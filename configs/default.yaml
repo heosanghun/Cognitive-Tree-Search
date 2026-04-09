@@ -1,0 +1,48 @@
+# CTS default config — paper appendix A.2 + improved plan extensions
+# See configs/README.md for paper cross-reference.
+
+dtype_weights: bfloat16
+broyden_max_iter: 30
+broyden_tol_min: 1.0e-4
+broyden_tol_max: 1.0e-2
+mcts_branching_W: 3
+mcts_simulations_per_step: 3
+
+# PPO (extended for reproducibility)
+lr: 3.0e-5
+batch_size: 16
+gamma: 0.95
+lora_rank: 8
+lora_target: ["q_proj", "v_proj"]
+ppo_clip_epsilon: 0.2
+gae_lambda: 0.95
+entropy_coef: 0.01
+value_loss_coef: 0.5
+max_grad_norm: 1.0
+
+# Data (paper intent)
+stage1_openmath_n: 10000
+stage2_math_prompts_n: 5000
+stage2_total_ppo_steps: 10000
+
+# Routing / ACT
+lambda_ado_penalty: 0.01
+top_k_modules: 3
+tau_flops_budget: 1.0e14
+
+# PUCT
+puct_variant: paper
+
+# Stage 1
+stage1_loss: fixed_point_residual
+stage1_max_steps: 2000
+
+# Eval / profiling
+eval_warmup_runs: 3
+eval_deterministic: false
+cuda_sync_for_timing: true
+max_anchor_tokens: null
+
+# Latent bottleneck (tunable; paper uses K x d)
+soft_thought_K: 8
+soft_thought_d: 64

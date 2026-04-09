@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Hugging Face / model weights (never commit)
+.hf_cache/
+**/.cache/huggingface/
+*.safetensors
+gemma-4-E4B*/
+gemma-3*/
+
+# Local experiment outputs & checkpoints
+artifacts/
+data/
+*.pt
+*.pth
+*.ckpt
+*.bin
+
+# Secrets
+.env
+.env.*
+*.pem
+*_token.txt
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

@@ -1,0 +1,3 @@
+# Ablation: static Serotonin scalar for PUCT / noise (paper Sec 7.4)
+nu_5ht_static: 1.0
+ablation_name: static_5ht
