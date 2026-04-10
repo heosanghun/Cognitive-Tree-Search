@@ -11,7 +11,7 @@ def test_transition_solver_stats_covers_flop_contract():
     from cts.deq.transition import transition
 
     bb = MockTinyBackbone(hidden=64, num_layers=42)
-    nu = NuVector(nu_ne=0.5, nu_ach=1.0, nu_5ht=1.0)
+    nu = NuVector(nu_tol=0.5, nu_temp=1.0, nu_expl=1.0)
     r = transition("x", 0, nu, RuntimeBudgetState(), bb, K=4, d=64, broyden_max_iter=5)
     keys = set(r.solver_stats.keys())
     assert SOLVER_STATS_KEYS_TRANSITION <= keys

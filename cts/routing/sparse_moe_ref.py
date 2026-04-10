@@ -1,8 +1,6 @@
-"""Sparse module routing (paper Eq. 5) — reference PyTorch."""
+"""Sparse module routing (paper Eq. 6) — reference PyTorch."""
 
 from __future__ import annotations
-
-from typing import Tuple
 
 import torch
 import torch.nn.functional as F
@@ -11,12 +9,15 @@ import torch.nn.functional as F
 def routing_weights(
     z: torch.Tensor,
     w_g: torch.Tensor,
-    nu_ach: float,
+    nu_temp: float,
     eps: float = 1e-6,
 ) -> torch.Tensor:
-    """alpha = softmax( (W_g @ pool(z)) / nu_ach ), z: [K, d], w_g: [n_mod, d]"""
+    """alpha = softmax( (W_g @ pool(z)) / νtemp ), z: [K, d], w_g: [n_mod, d]
+
+    Paper §5.2 Eq.(6): routing temperature νtemp applied token-wise.
+    """
     pooled = z.mean(dim=0)
-    logits = (w_g @ pooled) / max(float(nu_ach), eps)
+    logits = (w_g @ pooled) / max(float(nu_temp), eps)
     return F.softmax(logits, dim=-1)
 
 

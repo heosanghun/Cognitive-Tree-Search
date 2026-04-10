@@ -6,7 +6,7 @@ from cts.train.routing_proj_step import MockRoutingOnly, routing_entropy, routin
 def test_entropy_positive():
     bb = MockRoutingOnly(d=16)
     z = torch.randn(4, 16)
-    h = routing_entropy(z, bb, nu_ach=1.0)
+    h = routing_entropy(z, bb, nu_temp=1.0)
     assert h > 0
 
 

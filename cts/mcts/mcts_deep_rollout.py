@@ -1,8 +1,7 @@
 """
 N-ply anchor chain beyond 2-ply: repeated root rollouts → transition → new anchor.
 
-Generalizes `two_ply_mcts_rollouts` (depth=1 edge + child rollouts) to `n_plies` **transition edges**.
-Leaf backup: optional mean of terminal simulation rewards (stub: uses last ply `mcts_root_rollouts` Q).
+Generalizes `two_ply_mcts_rollouts` to `n_plies` transition edges.
 """
 
 from __future__ import annotations
@@ -13,6 +12,7 @@ from typing import List, Optional
 
 from cts.backbone.mock_tiny import MockTinyBackbone
 from cts.deq.transition import transition
+from cts.latent.faiss_context import LatentContextWindow
 from cts.mcts.episode import RootRolloutsResult, mcts_root_rollouts
 from cts.mcts.puct import PUCTVariant
 from cts.policy.meta_policy import MetaPolicy
@@ -45,18 +45,12 @@ def multi_ply_mcts_rollouts(
     tau_flops_budget: float = 1e20,
     puct_variant: PUCTVariant = "paper",
     reward_fn: Optional[Callable[[TransitionResult], float]] = None,
+    faiss_context: Optional[LatentContextWindow] = None,
 ) -> MultiPlyRolloutResult:
-    """
-    For each ply: `mcts_root_rollouts` at current anchor → pick best action → `transition` → extend anchor.
-
-    `n_plies`: number of **transition edges** (anchor depth increases each time).
-    After the last transition, one more `mcts_root_rollouts` at the leaf anchor for `leaf_mean_q`
-    (mean of Q over actions at that root).
-    """
     if n_plies < 1:
         raise ValueError("n_plies must be >= 1")
     bb = backbone or MockTinyBackbone(hidden=d, num_layers=42)
-    nu_eff = nu or NuVector(nu_ne=0.5, nu_ach=1.0, nu_5ht=1.0)
+    nu_eff = nu or NuVector(nu_tol=0.5, nu_temp=1.0, nu_expl=1.0)
     anchors: List[str] = [parent_text]
     transitions: List[TransitionResult] = []
     rollouts: List[RootRolloutsResult] = []
@@ -78,6 +72,7 @@ def multi_ply_mcts_rollouts(
             tau_flops_budget=tau_flops_budget,
             puct_variant=puct_variant,
             reward_fn=reward_fn,
+            faiss_context=faiss_context,
         )
         rollouts.append(r)
         priors = r.priors
@@ -94,6 +89,7 @@ def multi_ply_mcts_rollouts(
             d=d,
             broyden_max_iter=broyden_max_iter,
             tau_flops_budget=tau_flops_budget,
+            faiss_context=faiss_context,
         )
         transitions.append(tr)
         child_snippet = (tr.child_text or "").strip() or f"<branch {best_a}>"
@@ -115,6 +111,7 @@ def multi_ply_mcts_rollouts(
         tau_flops_budget=tau_flops_budget,
         puct_variant=puct_variant,
         reward_fn=reward_fn,
+        faiss_context=faiss_context,
     )
     rollouts.append(leaf)
     qs_nonzero = [leaf.qs[i] for i in range(W) if leaf.ns[i] > 0]

@@ -1,48 +1,83 @@
-# CTS default config — paper appendix A.2 + improved plan extensions
+# CTS default config — paper Table 4 + Appendix alignment
 # See configs/README.md for paper cross-reference.
 
 dtype_weights: bfloat16
+
+# === DEQ / Broyden (paper §4.2, §5.2) ===
 broyden_max_iter: 30
 broyden_tol_min: 1.0e-4
 broyden_tol_max: 1.0e-2
+broyden_fp32_buffer: true        # L-Broyden FP32 (paper §5.2)
+broyden_memory_limit: 10         # L-Broyden limited-memory rank-1 updates
+latent_tokens_K: 64              # K=64 latent tokens (paper §4.2)
+
+# === MCTS (paper §4.1) ===
 mcts_branching_W: 3
 mcts_simulations_per_step: 3
 
-# PPO (extended for reproducibility)
-lr: 3.0e-5
-batch_size: 16
-gamma: 0.95
-lora_rank: 8
-lora_target: ["q_proj", "v_proj"]
+# === PPO (paper Table 4) ===
+ppo_lr: 3.0e-5
+critic_lr: 1.0e-4
 ppo_clip_epsilon: 0.2
 gae_lambda: 0.95
 entropy_coef: 0.01
 value_loss_coef: 0.5
 max_grad_norm: 1.0
 
-# Data (paper intent)
-stage1_openmath_n: 10000
-stage2_math_prompts_n: 5000
+# === Reward (paper Eq. 5) ===
+act_halting_penalty: 0.05        # λ_halt
+reward_formula: binary_minus_depth
+discount_gamma: 0.99
+
+# === LoRA (paper §6.1) ===
+lora_rank: 8
+lora_alpha: 16
+lora_target: ["q_proj", "v_proj"]
+
+# === Data (paper §6) ===
+stage1_openmath_n: 10000          # 10K OpenMathInstruct-2 (paper §6.1)
+stage2_math_prompts_n: 5000       # 5K MATH/AIME (paper §6.2)
 stage2_total_ppo_steps: 10000
 
-# Routing / ACT
-lambda_ado_penalty: 0.01
+# === Routing / ACT (paper §5.2, §4.3) ===
 top_k_modules: 3
-tau_flops_budget: 1.0e14
+tau_flops_budget: 1.0e14          # Iso-FLOP budget (paper §7.1)
 
-# PUCT
+# === PUCT (paper Eq. 4) ===
 puct_variant: paper
 
-# Stage 1
-stage1_loss: fixed_point_residual
+# === Stage 1 (paper §6.1) ===
+stage1_loss: fixed_point_residual  # IFT residual ||f(z*)-z*||^2
 stage1_max_steps: 2000
 
-# Eval / profiling
+# === FAISS Latent Space Context Window (paper §4.4) ===
+faiss_enabled: true
+faiss_retrieval_k: 3              # Top-3 ancestral vectors
+faiss_min_steps: 10               # Active when t > 10
+
+# === Latent-to-Text Projection (paper §4.5) ===
+wproj_enabled: true
+think_mode_bypass: true           # '<|think|>' bypass
+
+# === Vision/Audio offloading (paper §7.1) ===
+offload_vision_audio: true        # ~0.9 GB VRAM savings
+
+# === Native Think (paper §7.1) ===
+enable_thinking: false            # enable_thinking=False in system prompt
+
+# === Eval / profiling ===
 eval_warmup_runs: 3
 eval_deterministic: false
+eval_seeds: 5                     # 5 seeds (paper §7)
+eval_ci_level: 0.95               # 95% CI (paper §7)
 cuda_sync_for_timing: true
 max_anchor_tokens: null
+max_new_tokens: 64                # Matches CTS K=64 representation bottleneck
 
-# Latent bottleneck (tunable; paper uses K x d)
+# === Legacy compatibility ===
+lr: 3.0e-5
+batch_size: 16
+gamma: 0.95
 soft_thought_K: 8
 soft_thought_d: 64
+lambda_ado_penalty: 0.01

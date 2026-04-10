@@ -26,7 +26,7 @@ def estimate_sparse_step_flops(
     module_weights: Sequence[float],
     macs_per_module: Sequence[float] | None = None,
     *,
-    nu_ado_scale: float = 1.0,
+    nu_act: float = 1.0,
 ) -> float:
     """FLOPs for one DEQ inner step after routing (same structure as `transition`)."""
     macs = macs_per_module or load_mac_per_module()
@@ -34,7 +34,7 @@ def estimate_sparse_step_flops(
         raise ValueError("macs_per_module length must match module_weights")
     total = 0.0
     for i, w in enumerate(module_weights):
-        total += float(w) * float(macs[i]) * nu_ado_scale
+        total += float(w) * float(macs[i]) * nu_act
     return total
 
 

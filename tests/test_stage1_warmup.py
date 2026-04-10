@@ -14,7 +14,7 @@ def test_surrogate_backward():
     from cts.backbone.mock_tiny import MockTinyBackbone
 
     bb = MockTinyBackbone(hidden=32, num_layers=8)
-    nu = NuVector(nu_ach=1.0)
+    nu = NuVector(nu_temp=1.0)
     w_g = torch.randn(19, 32) * 0.02
     z = torch.randn(4, 32)
     loss = fixed_point_surrogate_loss(bb, "x", z, nu, w_g=w_g)

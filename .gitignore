@@ -38,3 +38,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Paper PDF (double-blind review — do not include in public repo)
+doc/*.pdf

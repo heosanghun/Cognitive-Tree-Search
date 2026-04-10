@@ -1,4 +1,4 @@
-"""Core CTS datatypes: neuromodulator policy output vs runtime budget state."""
+"""Core CTS datatypes aligned with paper §2.3: ν = [νval, νexpl, νtol, νtemp, νact]."""
 
 from __future__ import annotations
 
@@ -10,26 +10,58 @@ import torch
 
 @dataclass
 class NuVector:
-    """Policy output per step (paper ν). Not the accumulated Adenosine budget."""
+    """Meta-policy output per step (paper §2.3).
 
-    nu_da: float = 1.0
-    nu_5ht: float = 1.0
-    nu_ne: float = 0.5  # maps to Broyden tol in [tol_min, tol_max]
-    nu_ach: float = 1.0
-    nu_ado_scale: float = 1.0
+    Paper naming: νval (state value), νexpl (exploration rate),
+    νtol (solver tolerance), νtemp (routing temperature), νact (ACT halting).
+    """
+
+    nu_val: float = 1.0
+    nu_expl: float = 1.0
+    nu_tol: float = 0.5  # maps to Broyden tol in [tol_min, tol_max]
+    nu_temp: float = 1.0
+    nu_act: float = 1.0
+
+    # Backward-compatible aliases (legacy neurotransmitter names)
+    @property
+    def nu_da(self) -> float:
+        return self.nu_val
+
+    @property
+    def nu_5ht(self) -> float:
+        return self.nu_expl
+
+    @property
+    def nu_ne(self) -> float:
+        return self.nu_tol
+
+    @property
+    def nu_ach(self) -> float:
+        return self.nu_temp
+
+    @property
+    def nu_ado_scale(self) -> float:
+        return self.nu_act
 
 
 @dataclass
 class RuntimeBudgetState:
-    """Environment-held compute accumulation (Adenosine / FLOPs)."""
+    """Environment-held compute accumulation (paper §4.3 ACT)."""
 
-    ado_accumulated: float = 0.0
+    mac_accumulated: float = 0.0
+    terminal_depth: int = 0
     flops_spent_step: float = 0.0
     wall_clock_ms_step: float = 0.0
 
+    # Backward-compatible alias
+    @property
+    def ado_accumulated(self) -> float:
+        return self.mac_accumulated
+
     def clone(self) -> "RuntimeBudgetState":
         return RuntimeBudgetState(
-            ado_accumulated=self.ado_accumulated,
+            mac_accumulated=self.mac_accumulated,
+            terminal_depth=self.terminal_depth,
             flops_spent_step=self.flops_spent_step,
             wall_clock_ms_step=self.wall_clock_ms_step,
         )
@@ -42,6 +74,7 @@ class TransitionResult:
     solver_stats: Dict[str, Any]
     prune: bool
     budget: RuntimeBudgetState
+    faiss_retrieved: Optional[torch.Tensor] = None
 
 
 @dataclass

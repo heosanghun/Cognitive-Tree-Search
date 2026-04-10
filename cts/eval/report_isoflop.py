@@ -20,7 +20,7 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     bb = MockTinyBackbone(hidden=64, num_layers=42).to(device)
-    nu = NuVector(nu_ne=0.5, nu_ach=1.0, nu_5ht=1.0)
+    nu = NuVector(nu_tol=0.5, nu_temp=1.0, nu_expl=1.0)
     budget = RuntimeBudgetState()
     r = transition(
         "iso-flop probe",

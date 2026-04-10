@@ -2,7 +2,7 @@
 Shallow MCTS-style expansion: root node + W `transition()` calls (mock or real backbone).
 
 Also: **PUCT select one child → single `transition`** (short loop) with optional ν / priors
-from `MetaPolicy` (paper Sec 4.1).
+from `MetaPolicy` (paper §4.1).
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import torch
 
 from cts.backbone.mock_tiny import MockTinyBackbone
 from cts.deq.transition import transition
+from cts.latent.faiss_context import LatentContextWindow
 from cts.mcts.puct import PUCTVariant, select_action
 from cts.mcts.tree import SearchTree
 from cts.policy.meta_policy import MetaPolicy
@@ -46,12 +47,13 @@ def expand_root_parallel_branches(
     backbone: object | None = None,
     broyden_max_iter: int = 40,
     tau_flops_budget: float = 1e20,
+    faiss_context: Optional[LatentContextWindow] = None,
 ) -> Tuple[SearchTree, List[TransitionResult]]:
     """
     Create root, run `transition` for branch_index in [0, W) — paper branching factor W.
     """
     bb = backbone or MockTinyBackbone(hidden=d, num_layers=42)
-    nu = nu or NuVector(nu_ne=0.5, nu_ach=1.0, nu_5ht=1.0)
+    nu = nu or NuVector(nu_tol=0.5, nu_temp=1.0, nu_expl=1.0)
     tree = SearchTree()
     root_id = tree.new_node(parent_text, None, 0, None, W=W)
     results: List[TransitionResult] = []
@@ -67,6 +69,7 @@ def expand_root_parallel_branches(
             d=d,
             broyden_max_iter=broyden_max_iter,
             tau_flops_budget=tau_flops_budget,
+            faiss_context=faiss_context,
         )
         results.append(r)
         child_text = r.child_text or ""
@@ -99,31 +102,32 @@ def puct_select_and_expand_once(
     puct_variant: PUCTVariant = "paper",
     n_root_visits: int = 0,
     reward_fn: Optional[Callable[[TransitionResult], float]] = None,
+    faiss_context: Optional[LatentContextWindow] = None,
 ) -> PUCTExpandOnceResult:
     """
     At root: PUCT picks one action `a`, then a single `transition(..., branch_index=a)`.
-
-    If `meta_policy` is set, `nu` and `priors` come from `forward(text_features)`
-    (unless `text_features` is None — then `parent_text_features(parent_text)` is used).
-    Otherwise defaults: uniform priors, `nu` or `NuVector()`.
     """
     bb = backbone or MockTinyBackbone(hidden=d, num_layers=42)
     if meta_policy is not None:
         dim = int(meta_policy.enc.in_features)
-        feats = text_features if text_features is not None else parent_text_features(parent_text, dim=dim)
+        feats = (
+            text_features
+            if text_features is not None
+            else parent_text_features(parent_text, dim=dim)
+        )
         if feats.dim() == 1:
             feats = feats.unsqueeze(0)
         nu, priors = meta_policy(feats)
     else:
         if nu is None:
-            nu = NuVector(nu_ne=0.5, nu_ach=1.0, nu_5ht=1.0)
+            nu = NuVector(nu_tol=0.5, nu_temp=1.0, nu_expl=1.0)
         if priors is None:
             priors = [1.0 / W] * W
 
     ns = [0] * W
     qs = [0.0] * W
     n_parent = max(1, n_root_visits)
-    a = select_action(puct_variant, nu.nu_5ht, priors, ns, qs, n_parent)
+    a = select_action(puct_variant, nu.nu_expl, priors, ns, qs, n_parent)
 
     budget = RuntimeBudgetState()
     r = transition(
@@ -136,6 +140,7 @@ def puct_select_and_expand_once(
         d=d,
         broyden_max_iter=broyden_max_iter,
         tau_flops_budget=tau_flops_budget,
+        faiss_context=faiss_context,
     )
     reward = reward_fn(r) if reward_fn is not None else default_transition_reward(r)
     qs[a] = reward
@@ -186,6 +191,7 @@ def mcts_root_rollouts(
     tau_flops_budget: float = 1e20,
     puct_variant: PUCTVariant = "paper",
     reward_fn: Optional[Callable[[TransitionResult], float]] = None,
+    faiss_context: Optional[LatentContextWindow] = None,
 ) -> RootRolloutsResult:
     """
     Repeat `num_simulations` times: PUCT at root → one `transition` → **backup** mean Q(a).
@@ -193,13 +199,17 @@ def mcts_root_rollouts(
     bb = backbone or MockTinyBackbone(hidden=d, num_layers=42)
     if meta_policy is not None:
         dim = int(meta_policy.enc.in_features)
-        feats = text_features if text_features is not None else parent_text_features(parent_text, dim=dim)
+        feats = (
+            text_features
+            if text_features is not None
+            else parent_text_features(parent_text, dim=dim)
+        )
         if feats.dim() == 1:
             feats = feats.unsqueeze(0)
         nu, priors = meta_policy(feats)
     else:
         if nu is None:
-            nu = NuVector(nu_ne=0.5, nu_ach=1.0, nu_5ht=1.0)
+            nu = NuVector(nu_tol=0.5, nu_temp=1.0, nu_expl=1.0)
         if priors is None:
             priors = [1.0 / W] * W
 
@@ -209,7 +219,7 @@ def mcts_root_rollouts(
 
     for _ in range(num_simulations):
         n_parent = max(1, sum(ns))
-        a = select_action(puct_variant, nu.nu_5ht, priors, ns, qs, n_parent)
+        a = select_action(puct_variant, nu.nu_expl, priors, ns, qs, n_parent)
         budget = RuntimeBudgetState()
         r = transition(
             parent_text,
@@ -221,6 +231,7 @@ def mcts_root_rollouts(
             d=d,
             broyden_max_iter=broyden_max_iter,
             tau_flops_budget=tau_flops_budget,
+            faiss_context=faiss_context,
         )
         transitions.append(r)
         rew = reward_fn(r) if reward_fn is not None else default_transition_reward(r)

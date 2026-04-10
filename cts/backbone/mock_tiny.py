@@ -48,9 +48,12 @@ class MockTinyBackbone(BaseCTSBackbone, nn.Module):
         module_weights: torch.Tensor,
         extra: Dict[str, Any],
     ) -> torch.Tensor:
-        # z: [K, d], context: [1, d] — contractive mix toward fixed point
+        # z: [K, d], context: [S, d] where S >= 1 (may include FAISS prefix)
         k, d = z.shape
-        ctx = context.expand(k, -1)
+        if context.shape[0] > 1:
+            ctx = context.mean(dim=0, keepdim=True).expand(k, -1)
+        else:
+            ctx = context.expand(k, -1)
         h = torch.cat([z, ctx], dim=-1)
         delta = self.mix(h)
         out = self.act(self.proj_z(z) + delta) * 0.5 + z * 0.5

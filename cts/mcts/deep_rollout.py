@@ -12,6 +12,7 @@ from typing import Optional
 
 from cts.backbone.mock_tiny import MockTinyBackbone
 from cts.deq.transition import transition
+from cts.latent.faiss_context import LatentContextWindow
 from cts.mcts.episode import RootRolloutsResult, mcts_root_rollouts
 from cts.mcts.puct import PUCTVariant
 from cts.policy.meta_policy import MetaPolicy
@@ -42,12 +43,8 @@ def two_ply_mcts_rollouts(
     tau_flops_budget: float = 1e20,
     puct_variant: PUCTVariant = "paper",
     reward_fn: Optional[Callable[[TransitionResult], float]] = None,
+    faiss_context: Optional[LatentContextWindow] = None,
 ) -> TwoPlyResult:
-    """
-    1) Rollouts at `parent_text`, pick `a* = argmax_a Q(a)` among visited actions.
-    2) Build child anchor = `parent + separator + child_text` from one `transition` at `a*`.
-    3) Rollouts again at child anchor (same ν; priors from first ply).
-    """
     bb = backbone or MockTinyBackbone(hidden=d, num_layers=42)
     r1 = mcts_root_rollouts(
         parent_text,
@@ -62,6 +59,7 @@ def two_ply_mcts_rollouts(
         tau_flops_budget=tau_flops_budget,
         puct_variant=puct_variant,
         reward_fn=reward_fn,
+        faiss_context=faiss_context,
     )
 
     visited = [a for a in range(W) if r1.ns[a] > 0]
@@ -79,6 +77,7 @@ def two_ply_mcts_rollouts(
         d=d,
         broyden_max_iter=broyden_max_iter,
         tau_flops_budget=tau_flops_budget,
+        faiss_context=faiss_context,
     )
     child_snippet = (tr.child_text or "").strip() or f"<branch {best_a}>"
     anchor = f"{parent_text}{separator}{child_snippet}"
@@ -97,6 +96,7 @@ def two_ply_mcts_rollouts(
         tau_flops_budget=tau_flops_budget,
         puct_variant=puct_variant,
         reward_fn=reward_fn,
+        faiss_context=faiss_context,
     )
 
     return TwoPlyResult(root=r1, child=r2, best_action=best_a, child_anchor_text=anchor)

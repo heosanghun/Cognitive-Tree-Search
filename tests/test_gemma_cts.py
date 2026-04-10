@@ -34,7 +34,7 @@ def test_gemma_transition_cpu():
 
     model, tok = load_gemma4_e4b(device_map="cpu", torch_dtype=torch.bfloat16)
     bb = GemmaCTSBackbone(model, tok)
-    nu = NuVector(nu_ne=0.6, nu_ach=1.0, nu_5ht=1.0)
+    nu = NuVector(nu_tol=0.6, nu_temp=1.0, nu_expl=1.0)
     budget = RuntimeBudgetState()
     r = transition(
         "Say hello in one word.",

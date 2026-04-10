@@ -1,8 +1,8 @@
 """
-Stage 1: OpenMathInstruct JSONL + GemmaCTSBackbone + fixed-point surrogate loss
-(`fixed_point_surrogate_loss` — one-step ||Phi(z)-z||^2).
+Stage 1: OpenMathInstruct JSONL + GemmaCTSBackbone + IFT residual loss (paper §6.1).
 
 Base Gemma weights are frozen; trains `routing_proj`, `_blend`, and optional LoRA adapters.
+LoRA r=8, ~18 MB trainable parameters. 10,000 examples from OpenMathInstruct-2.
 """
 
 from __future__ import annotations
@@ -74,9 +74,11 @@ def run_stage1_openmath_training(
     deq_from_cfg = cfg.get("cts_deq_map_mode")
     if deq_from_cfg and not os.environ.get("CTS_DEQ_MAP_MODE"):
         os.environ["CTS_DEQ_MAP_MODE"] = str(deq_from_cfg)
-    steps = int(max_steps if max_steps is not None else cfg.get("stage1_max_steps", 2000))
+    steps = int(
+        max_steps if max_steps is not None else cfg.get("stage1_max_steps", 2000)
+    )
     K = int(cfg.get("soft_thought_K", 8))
-    nu = NuVector(nu_ne=0.5, nu_ach=1.0, nu_5ht=1.0)
+    nu = NuVector(nu_tol=0.5, nu_temp=1.0, nu_expl=1.0)
 
     dev_s = device or ("cuda:0" if torch.cuda.is_available() else "cpu")
     dev = torch.device(dev_s)
@@ -95,7 +97,9 @@ def run_stage1_openmath_training(
 
     targets = lora_targets or list(cfg.get("lora_target", ["q_proj", "v_proj"]))
     if lora:
-        bb = _maybe_apply_lora(bb, rank=int(cfg.get("lora_rank", 8)), target_modules=targets)
+        bb = _maybe_apply_lora(
+            bb, rank=int(cfg.get("lora_rank", 8)), target_modules=targets
+        )
     _set_trainable_params(bb, train_lora=lora)
 
     params = [p for p in bb.parameters() if p.requires_grad]
@@ -123,20 +127,29 @@ def run_stage1_openmath_training(
         w_g = bb.routing_matrix().to(device=dev, dtype=torch.float32)
 
         opt.zero_grad(set_to_none=True)
-        extra: Dict[str, Any] = {"top_k": int(cfg.get("top_k_modules", 3)), "deq_map_mode": bb.deq_map_mode}
+        extra: Dict[str, Any] = {
+            "top_k": int(cfg.get("top_k_modules", 3)),
+            "deq_map_mode": bb.deq_map_mode,
+        }
 
         if scaler is not None:
             with torch.cuda.amp.autocast(dtype=torch.bfloat16):
-                loss = fixed_point_surrogate_loss(bb, text, z, nu, w_g=w_g, extra=extra)
+                loss = fixed_point_surrogate_loss(
+                    bb, text, z, nu, w_g=w_g, extra=extra
+                )
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
-            torch.nn.utils.clip_grad_norm_(params, float(cfg.get("max_grad_norm", 1.0)))
+            torch.nn.utils.clip_grad_norm_(
+                params, float(cfg.get("max_grad_norm", 1.0))
+            )
             scaler.step(opt)
             scaler.update()
         else:
             loss = fixed_point_surrogate_loss(bb, text, z, nu, w_g=w_g, extra=extra)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(params, float(cfg.get("max_grad_norm", 1.0)))
+            torch.nn.utils.clip_grad_norm_(
+                params, float(cfg.get("max_grad_norm", 1.0))
+            )
             opt.step()
 
         lv = float(loss.detach().cpu().item())
@@ -158,4 +171,8 @@ def run_stage1_openmath_training(
         out_path,
     )
     print("Wrote checkpoint", out_path)
-    return {"checkpoint": str(out_path), "final_loss": losses[-1] if losses else 0.0, "steps": steps}
+    return {
+        "checkpoint": str(out_path),
+        "final_loss": losses[-1] if losses else 0.0,
+        "steps": steps,
+    }

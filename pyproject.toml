@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cognitive-tree-search"
-version = "0.1.0"
-description = "Cognitive Tree Search (CTS) — DEQ + neuromodulated MCTS research codebase"
+version = "0.2.0"
+description = "Cognitive Tree Search (CTS) — KV-Cache-Free DEQ + neuromodulated MCTS (NeurIPS 2026)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
@@ -29,6 +29,9 @@ data = [
 ]
 train = [
   "peft>=0.10",
+]
+faiss = [
+  "faiss-cpu>=1.7",
 ]
 # Gemma 4 needs transformers with model_type gemma4 (often main branch until release):
 # pip install git+https://github.com/huggingface/transformers.git

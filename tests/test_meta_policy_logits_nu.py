@@ -8,7 +8,7 @@ def test_logits_and_nu_matches_forward_priors():
     x = torch.randn(16)
     nu1, logits = m.logits_and_nu(x)
     nu2, p = m.forward(x)
-    assert nu1.nu_ach == nu2.nu_ach
+    assert nu1.nu_temp == nu2.nu_temp
     logits2 = m.head_prior(m.act(m.enc(x.unsqueeze(0)))).squeeze(0)
     assert torch.allclose(logits, logits2)
     import math

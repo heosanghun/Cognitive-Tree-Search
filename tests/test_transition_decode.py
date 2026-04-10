@@ -21,7 +21,7 @@ class _BackboneWithDecode(MockTinyBackbone):
 
 def test_transition_passes_max_decode_tokens():
     bb = _BackboneWithDecode()
-    nu = NuVector(nu_ne=0.5, nu_ach=1.0, nu_5ht=1.0)
+    nu = NuVector(nu_tol=0.5, nu_temp=1.0, nu_expl=1.0)
     budget = RuntimeBudgetState()
     r = transition(
         "x",

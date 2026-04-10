@@ -70,7 +70,7 @@ def main() -> None:
     print("CTS_DEQ_MAP_MODE=", mode, "(1단계=blend, 2단계=parallel)")
     model, tok = load_gemma4_e4b(model_id=local, device_map=dm, torch_dtype=torch.bfloat16)
     bb = GemmaCTSBackbone(model, tok)
-    nu = NuVector(nu_ne=0.5, nu_ach=1.0, nu_5ht=1.0)
+    nu = NuVector(nu_tol=0.5, nu_temp=1.0, nu_expl=1.0)
     r = transition(
         "2+2=?",
         0,

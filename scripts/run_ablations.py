@@ -35,18 +35,18 @@ def main() -> None:
         default=None,
         help="YAML name without path (e.g. ablation_no_ach) — merged with configs/default.yaml",
     )
-    ap.add_argument("--static-5ht", action="store_true", help="Set ν_5HT to 1.0 (ignored if yaml sets nu_5ht_static)")
+    ap.add_argument("--static-5ht", action="store_true", help="Set ν_5HT to 1.0 (ignored if yaml sets nu_expl_static)")
     args = ap.parse_args()
 
     cfg = load_config(args.config) if args.config else {}
     routing_mode = cfg.get("routing_mode", args.routing)
-    if "nu_5ht_static" in cfg:
-        nu_5ht = float(cfg["nu_5ht_static"])
+    if "nu_expl_static" in cfg:
+        nu_expl = float(cfg["nu_expl_static"])
     else:
-        nu_5ht = 1.0 if args.static_5ht else 0.65
+        nu_expl = 1.0 if args.static_5ht else 0.65
 
     bb = MockTinyBackbone(hidden=64, num_layers=42)
-    nu = NuVector(nu_ne=0.5, nu_ach=1.0, nu_5ht=nu_5ht)
+    nu = NuVector(nu_tol=0.5, nu_temp=1.0, nu_expl=nu_expl)
     budget = RuntimeBudgetState()
     r = transition(
         "ablation prompt",
@@ -65,8 +65,8 @@ def main() -> None:
         args.config,
         "routing_mode=",
         routing_mode,
-        "nu_5ht=",
-        nu_5ht,
+        "nu_expl=",
+        nu_expl,
         "prune=",
         r.prune,
         "converged=",
