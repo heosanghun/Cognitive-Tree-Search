@@ -23,10 +23,11 @@ from cts.critic.neuro_critic import NeuroCritic
 from cts.deq.transition import transition
 from cts.mcts.critic_reward import make_critic_reward_fn
 from cts.mcts.episode import default_transition_reward
+from cts.rewards.shaping import paper_reward
 from cts.model.gemma_loader import load_gemma4_e4b
 from cts.policy.meta_policy import MetaPolicy
 from cts.train.jsonl_iter import iter_jsonl
-from cts.train.ppo_core import ppo_clipped_loss, value_loss
+from cts.train.ppo_core import compute_gae, ppo_clipped_loss, value_loss
 from cts.types import RuntimeBudgetState
 from cts.utils.config import load_config
 from cts.utils.repro_seed import apply_global_seed
@@ -64,7 +65,7 @@ def run_stage2_math_ppo(
     total_steps: Optional[int] = None,
     device: Optional[str] = None,
     W: int = 3,
-    K: int = 8,
+    K: int = 64,
     collect_batch: int = 4,
     ppo_epochs: int = 2,
     broyden_max_iter: int = 12,
@@ -120,6 +121,11 @@ def run_stage2_math_ppo(
     clip = float(cfg.get("ppo_clip_epsilon", 0.2))
     vf_coef = float(cfg.get("value_loss_coef", 0.5))
     ent_coef = float(cfg.get("entropy_coef", 0.01))
+    tau_budget = float(cfg.get("tau_flops_budget", 1e14))
+    lambda_halt = float(cfg.get("act_halting_penalty", 0.05))
+    gae_gamma = float(cfg.get("discount_gamma", 0.99))
+    gae_lam = float(cfg.get("gae_lambda", 0.95))
+    K = int(cfg.get("latent_tokens_K", K))
 
     path = Path(math_prompts_jsonl)
     if not path.is_file():
@@ -162,22 +168,25 @@ def run_stage2_math_ppo(
                 old_logp = float(dist_old.log_prob(torch.tensor(action, device=dev)).item())
                 v_old = float(value_head(obs).item())
 
+            budget = RuntimeBudgetState()
             tr = transition(
                 prompt,
                 action,
                 nu,
-                RuntimeBudgetState(),
+                budget,
                 bb,
                 K=K,
                 d=H,
                 broyden_max_iter=broyden_max_iter,
-                tau_flops_budget=float("inf"),
+                tau_flops_budget=tau_budget,
                 max_decode_tokens=1,
             )
             if reward_fn is not None:
                 r = reward_fn(tr)
             else:
-                r = default_transition_reward(tr)
+                converged = tr.solver_stats.get("converged", False)
+                depth_T = tr.budget.terminal_depth if tr.budget else 1
+                r = paper_reward(correct=converged, terminal_depth=depth_T, lambda_halt=lambda_halt)
 
             zs = tr.z_star_child
             if zs is not None:
@@ -203,9 +212,13 @@ def run_stage2_math_ppo(
         rewards_t = torch.tensor(batch_rewards, device=dev, dtype=torch.float32)
         values_t = torch.tensor(batch_values, device=dev, dtype=torch.float32)
 
-        advantages = rewards_t - values_t
+        dones_list = [True] * len(batch_rewards)
+        adv_list, ret_list = compute_gae(
+            batch_rewards, batch_values, dones_list, gamma=gae_gamma, lam=gae_lam,
+        )
+        advantages = torch.tensor(adv_list, device=dev, dtype=torch.float32)
         advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
-        returns = rewards_t
+        returns = torch.tensor(ret_list, device=dev, dtype=torch.float32)
 
         z_batch = torch.stack(batch_z, dim=0)
         for _ in range(ppo_epochs):

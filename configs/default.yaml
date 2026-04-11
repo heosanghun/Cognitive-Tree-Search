@@ -74,10 +74,10 @@ cuda_sync_for_timing: true
 max_anchor_tokens: null
 max_new_tokens: 64                # Matches CTS K=64 representation bottleneck
 
-# === Legacy compatibility ===
-lr: 3.0e-5
+# === Legacy compatibility (kept for backward compat; canonical values above take precedence) ===
+lr: 3.0e-5                  # same as ppo_lr
 batch_size: 16
-gamma: 0.95
-soft_thought_K: 8
+gamma: 0.99                 # aligned with discount_gamma (paper Table 4)
+soft_thought_K: 64           # aligned with latent_tokens_K (paper §4.2)
 soft_thought_d: 64
-lambda_ado_penalty: 0.01
+lambda_ado_penalty: 0.05     # aligned with act_halting_penalty (paper Eq.5)

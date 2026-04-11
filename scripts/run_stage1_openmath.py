@@ -23,7 +23,10 @@ def main() -> None:
     p.add_argument("--config", type=str, default="default")
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--device", type=str, default=None)
-    p.add_argument("--lora", action="store_true", help="Apply PEFT LoRA on language_model (requires peft)")
+    p.add_argument("--lora", action="store_true", default=True,
+                   help="Apply PEFT LoRA r=8 on language_model (paper §6.1, default: on)")
+    p.add_argument("--no-lora", dest="lora", action="store_false",
+                   help="Disable LoRA (ablation only)")
     p.add_argument("--log-every", type=int, default=20)
     p.add_argument("--model-dir", type=str, default=None, help="Override CTS_GEMMA_MODEL_DIR")
     args = p.parse_args()
