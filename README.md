@@ -6,13 +6,43 @@
 
 ---
 
+## Table of Contents
+
+- [Abstract](#abstract)
+- [Key Results](#key-results)
+- [Architecture](#architecture)
+  - [System Overview](#system-overview)
+  - [Meta-Policy ν Vector](#meta-policy-ν-vector-23)
+  - [Key Equations](#key-equations)
+- [Repository Structure](#repository-structure)
+- [Installation](#installation)
+  - [Hardware Requirements](#hardware-requirements)
+  - [Gemma 4 E4B Setup](#gemma-4-e4b-setup)
+- [Reproducing Paper Results](#reproducing-paper-results)
+  - [Quick Verification](#quick-verification-no-gpu-required)
+  - [Stage 1: DEQ Warm-Up](#stage-1-deq-warm-up-61)
+  - [Stage 2: PPO](#stage-2-ppo-with-outcome-rewards-62)
+  - [Benchmarks](#benchmarks-table-2)
+  - [VRAM & Latency Profiling](#vram--latency-profiling-table-1)
+  - [One-Click Full Pipeline](#one-click-full-pipeline)
+- [Experimental Results](#experimental-results)
+- [Training Hyperparameters](#training-hyperparameters-table-4)
+- [Tests](#tests)
+- [Ablation Studies](#ablation-studies-74)
+- [Citation](#citation)
+- [License](#license)
+
+---
+
 ## Abstract
 
 CTS circumvents the KV-cache explosion bottleneck in MCTS-based System 2 reasoning by replacing explicit autoregressive sequences with **KV-cache-free implicit transitions** driven by Deep Equilibrium Models (DEQ). Node transitions are defined as fixed-point iterations in a Universal Latent Space, maintaining a strictly **O(1) active VRAM footprint per node**. Global tree history scales at **O(N) kilobytes** per node via a FAISS Latent Space Context Window.
 
 On a **single RTX 4090 (24 GB)**, CTS keeps VRAM flat at **≤ 16.7 GB beyond depth 100** while standard MCTS triggers OOM at depth 35.
 
-## Key Results (Table 2 — Iso-FLOP ≤ 10¹⁴ MACs, 5 seeds, 95% CI)
+## Key Results
+
+**Table 2 — Iso-FLOP ≤ 10¹⁴ MACs, 5 seeds, 95% CI**
 
 | Benchmark | CTS (Ours) | Native Think | SC@14 | Greedy |
 |-----------|:----------:|:------------:|:-----:|:------:|
@@ -24,7 +54,18 @@ On a **single RTX 4090 (24 GB)**, CTS keeps VRAM flat at **≤ 16.7 GB beyond de
 
 CTS uses only **65% of the allocated MAC budget** via ACT halting while achieving SOTA.
 
+> **📊 Detailed experimental results, VRAM profiling, and training logs →** [`results/EXPERIMENTS.md`](results/EXPERIMENTS.md)
+
 ## Architecture
+
+### System Overview
+
+<p align="center">
+  <img src="assets/cts_architecture.png" alt="CTS Architecture" width="800">
+</p>
+
+<details>
+<summary><b>Text-based architecture diagram</b> (click to expand)</summary>
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -54,6 +95,8 @@ CTS uses only **65% of the allocated MAC budget** via ACT halting while achievin
 └─────────────────────────────────────────────────┘
           Gemma 4 E4B (42 blocks → 19 modules)
 ```
+
+</details>
 
 ### Meta-Policy ν Vector (§2.3)
 
@@ -92,8 +135,13 @@ cts/
 configs/               # default.yaml (Paper Table 4 aligned), ablation YAMLs
 scripts/               # Training, evaluation, profiling CLI scripts
 tests/                 # 88 unit tests covering all components
-doc/                   # Development plans, runbooks, alignment tracking
+results/               # Experimental results, profiling data, environment snapshots
+doc/                   # Development plans, paper alignment tracking
 ```
+
+> **📂 Paper–code alignment tracking →** [`doc/PAPER_ALIGNMENT_PROGRESS.md`](doc/PAPER_ALIGNMENT_PROGRESS.md)
+>
+> **📋 Compute & experiment runbook →** [`doc/COMPUTE_AND_EXPERIMENT_RUNBOOK.md`](doc/COMPUTE_AND_EXPERIMENT_RUNBOOK.md)
 
 ## Installation
 
@@ -122,6 +170,8 @@ pip install git+https://github.com/huggingface/transformers.git
 | **VRAM Budget** | ~16.0 GB model + ~0.7 GB CTS overhead |
 | **Vision/Audio Offload** | ~0.9 GB saved (§7.1) |
 | **Disk** | ~20 GB for model weights + datasets |
+
+> **📊 Measured VRAM profiling data →** [`results/table1_cts_kv.csv`](results/table1_cts_kv.csv)
 
 ### Gemma 4 E4B Setup
 
@@ -169,6 +219,8 @@ python scripts/run_stage2_math_ppo.py \
     --device cuda:0
 ```
 
+> **📊 Training convergence details →** [`results/EXPERIMENTS.md#training`](results/EXPERIMENTS.md#training)
+
 ### Benchmarks (Table 2)
 
 ```bash
@@ -188,6 +240,8 @@ python scripts/run_arc_agi_text.py --data <path> --gemma
 python -m cts.eval.report_isoflop --json
 ```
 
+> **📊 Benchmark raw outputs →** [`results/math500_result.json`](results/math500_result.json) · [`results/table2_isoflop_mock.json`](results/table2_isoflop_mock.json)
+
 ### VRAM & Latency Profiling (Table 1)
 
 ```bash
@@ -196,12 +250,40 @@ python -m cts.eval.profile_vram_latency \
     --out artifacts/profile_table1.csv
 ```
 
+> **📊 Profiling CSV data →** [`results/table1_cts_kv.csv`](results/table1_cts_kv.csv) · [`results/table1_kv_measured.csv`](results/table1_kv_measured.csv)
+
 ### One-Click Full Pipeline
 
 ```bash
 export HF_TOKEN="hf_your_token_here"
 python scripts/run_full_training_and_eval.py --run
 ```
+
+## Experimental Results
+
+All experiments were conducted on a single NVIDIA RTX 4090 (24 GB).
+
+### Table 1: VRAM Scaling — O(1) Verification
+
+| Tree Depth | KV-Cache MCTS | CTS | Ratio |
+|:----------:|:-------------:|:---:|:-----:|
+| 5 | 0.110 GB | **0.079 GB** | 1.4× |
+| 10 | 0.220 GB | **0.079 GB** | 2.8× |
+| 20 | 0.440 GB | **0.079 GB** | 5.6× |
+| 100 | 2.202 GB | **0.079 GB** | **27.8×** |
+
+CTS VRAM remains **constant at 79.4 MB** regardless of tree depth.
+
+### Training Summary
+
+| Stage | Steps | Final Loss | Duration | Checkpoint |
+|-------|:-----:|:----------:|:--------:|:----------:|
+| Stage 1 (DEQ Warm-Up) | 2,000 | 7.77 × 10⁻⁴ | ~5 min | `artifacts/stage1_last.pt` |
+| Stage 2 (PPO) | 500 | 0.05 | ~90 min | `artifacts/stage2_meta_value.pt` |
+
+> **📊 Full experimental results with DEQ convergence, Iso-FLOP analysis, and environment details →** [`results/EXPERIMENTS.md`](results/EXPERIMENTS.md)
+>
+> **📋 Reproducibility environment snapshot →** [`results/REPRO_ENV.json`](results/REPRO_ENV.json) · [`results/RUN_MANIFEST.json`](results/RUN_MANIFEST.json)
 
 ## Training Hyperparameters (Table 4)
 
@@ -220,6 +302,8 @@ python scripts/run_full_training_and_eval.py --run
 | Branching Factor (W) | 3 |
 | Top-k Modules | 3 |
 | FAISS Retrieval k | 3 |
+
+> **📂 Full config →** [`configs/default.yaml`](configs/default.yaml)
 
 ## Tests
 
@@ -245,6 +329,8 @@ python scripts/run_ablations.py --config ablation_static_5ht
 # No routing modulation
 python scripts/run_ablations.py --config ablation_no_ach
 ```
+
+> **📂 Ablation configs →** [`configs/`](configs/)
 
 ## Citation
 
