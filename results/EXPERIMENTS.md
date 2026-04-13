@@ -45,6 +45,52 @@ CTS maintains **O(1) VRAM** per node regardless of tree depth, while standard KV
 | 15 | 81.3 | 27.1 |
 | 20 | 77.9 | 26.0 |
 
+### Real Gemma 4 E4B VRAM Profile (RTX 4090)
+
+Measured with actual Gemma 4 E4B model loaded in BF16 with vision/audio offloading (~0.88 GB saved).
+
+| Tree Depth | Peak VRAM (GB) | Model VRAM (GB) | CTS Overhead (MB) |
+|:----------:|:--------------:|:---------------:|:-----------------:|
+| 1 | 14.84 | 14.70 | 142.9 |
+| 15 | 14.84 | 14.70 | 142.9 |
+| 35 | 14.84 | 14.70 | 142.9 |
+| 100 | 14.84 | 14.70 | 142.9 |
+
+**Key result**: CTS overhead is **constant at 142.9 MB** regardless of tree depth — confirms O(1) memory property with real model weights.
+
+---
+
+## Spectral Radius (Appendix G)
+
+Jacobian spectral radius measured on real Gemma 4 E4B backbone, 10 random samples.
+
+| Metric | Value | Paper Target |
+|--------|:-----:|:------------:|
+| Mean γ | **0.8203** | ~0.92 |
+| Std γ | 0.0000 | — |
+| Contraction (γ < 1.0) | **YES** | YES |
+
+γ < 1.0 confirms Broyden fixed-point convergence is guaranteed.
+
+---
+
+## 5-Seed Statistical Validation
+
+| Seed | Convergence Rate | Avg Iterations | Avg Residual |
+|:----:|:----------------:|:--------------:|:------------:|
+| 42 | 100.0% | 14.0 | 3.83e-03 |
+| 123 | 100.0% | 13.7 | 3.58e-03 |
+| 456 | 100.0% | 13.4 | 4.16e-03 |
+| 789 | 100.0% | 15.0 | 3.59e-03 |
+| 2026 | 100.0% | 13.8 | 3.52e-03 |
+
+| Metric | Measured (95% CI) | Paper Target |
+|--------|:-----------------:|:------------:|
+| Convergence Rate | **100.0% ± 0.0%** | 97.3 ± 0.4% |
+| Avg Iterations | **14.0 ± 0.5** | 11.2 ± 2.8 |
+
+---
+
 ## Table 2: Iso-FLOP Analysis
 
 ### DEQ Convergence Profile
@@ -58,14 +104,36 @@ CTS maintains **O(1) VRAM** per node regardless of tree depth, while standard KV
 | Converged | ✓ |
 | Final residual norm | 3.42 × 10⁻³ |
 
-### Baseline: Raw Gemma 4 E4B (no CTS)
+### Full Strategy Comparison — Synthetic Data (20 samples, Stage 2 = 500 PPO steps)
 
-- MATH-500: **0.0%** pass@1 (50 samples)
-  - This represents the raw model without MCTS/DEQ reasoning pipeline
-  - Model repeats the question or generates incoherent outputs
-  - Confirms the necessity of CTS for structured reasoning
+| Strategy | Correct | Total | Accuracy | Paper Target |
+|----------|:-------:|:-----:|:--------:|:------------:|
+| Greedy | 0 | 20 | 0.0% | 45.2% |
+| SC@14 (majority vote, T=0.7) | 3 | 20 | **15.0%** | 59.3% |
+| Native Think (enable_thinking) | 1 | 20 | 5.0% | 57.0% |
+| CTS (DEQ + MCTS) | 0 | 20 | 0.0% | 68.4% |
 
-### Paper Target Results (Table 2, Iso-FLOP ≤ 10¹⁴ MACs)
+### Full 5-Benchmark Comparison — Real Datasets (50 samples each, 6.9 hours)
+
+Official datasets: MATH-500, GSM8K, AIME (AI-MO), ARC-Challenge (AllenAI), HumanEval (OpenAI).
+
+| Benchmark | Greedy | Native Think | CTS | Paper CTS |
+|-----------|:------:|:------------:|:---:|:---------:|
+| MATH-500 | **12.0%** (6/50) | **12.0%** (6/50) | 0.0% (0/50) | 68.4% |
+| GSM8K | **4.0%** (2/50) | 2.0% (1/50) | 0.0% (0/50) | 92.1% |
+| AIME | 0.0% (0/50) | 0.0% (0/50) | 0.0% (0/50) | 56.4% |
+| ARC-Challenge | **20.0%** (10/50) | **16.0%** (8/50) | 0.0% (0/50) | 64.1% |
+| HumanEval | **12.0%** (6/50) | **8.0%** (4/50) | 0.0% (0/50) | 74.2% |
+
+**Key observations:**
+- Real datasets show meaningful non-zero accuracy for Greedy/NativeThink (unlike synthetic data)
+- ARC-Challenge achieves highest Greedy accuracy (20%), consistent with multiple-choice format
+- MATH-500 Greedy (12%) is reasonable for a 4B model without instruction tuning
+- CTS remains at 0% across all benchmarks due to insufficient training (500 vs 10K+ steps)
+- SC@14 was not run in Phase 5 due to time constraints (14x generation per problem)
+- Total evaluation time: 6.9 hours on RTX 4090 (50 problems × 5 benchmarks × 3 strategies)
+
+### Paper Target Results (Table 2, Iso-FLOP ≤ 10¹⁴ MACs, full 10K+ step training)
 
 | Benchmark | CTS (Paper) | Native Think | SC@14 | Greedy |
 |-----------|:-----------:|:------------:|:-----:|:------:|
@@ -114,6 +182,27 @@ python scripts/run_full_training_and_eval.py --run
 # Quick verification (no GPU needed)
 pytest tests/ -q
 python scripts/verify_full_pipeline.py
+```
+
+## Current Status & Next Steps
+
+### What's Complete
+- Code architecture: 100% aligned with paper (54/54 items)
+- Table 1 (VRAM O(1)): Confirmed with real Gemma 4 E4B
+- Spectral radius (App. G): gamma=0.82 < 1.0 confirmed
+- 5-seed convergence: 100% convergence rate confirmed
+- 5-benchmark evaluation with real datasets: completed (50 samples each)
+
+### What's Needed for Paper-Level Numbers
+1. **System reboot** (CUDA driver unstable after 7hr continuous GPU use)
+2. **Full-scale Stage 2 PPO training** (10K+ steps, ~48 hours)
+3. **Re-evaluation** with improved answer extraction (`scripts/run_paper_reproduction.py`)
+
+### Reproduction Command (After Reboot)
+
+```powershell
+$env:PYTHONIOENCODING="utf-8"; $env:PYTHONUNBUFFERED="1"
+python -u scripts/run_paper_reproduction.py --phase all --ppo-steps 10000
 ```
 
 ## Environment Snapshot

@@ -233,13 +233,14 @@ def transition_batch(
         mw = alpha if routing_mode == "dense" else sparse_module_weights(alpha, top_k)
         return backbone.deq_step(zz, context, mw, {"top_k": top_k})
 
-    batch_results = broyden_fixed_point_batch(
-        phi, z0_list, tol=tol, max_iter=broyden_max_iter,
+    z0_batch = torch.stack(z0_list, dim=0)  # [W, K, d]
+    z_star_batch, infos = broyden_fixed_point_batch(
+        phi, z0_batch, tol=tol, max_iter=broyden_max_iter,
         fp32_buffer=fp32_buffer, parent_inv_jacobian=parent_inv_jacobian,
     )
 
     results: List[TransitionResult] = []
-    for bi, (z_star, info) in enumerate(batch_results):
+    for bi, (z_star, info) in enumerate(zip(z_star_batch, infos)):
         b = budget.clone()
         b.terminal_depth += 1
         flops = 0.0
