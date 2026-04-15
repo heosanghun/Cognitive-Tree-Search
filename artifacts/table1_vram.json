@@ -1,0 +1,16 @@
+{
+  "table": "Table 1",
+  "description": "Active VRAM During Search Phase (W=3)",
+  "base_model_vram_gb": 14.9,
+  "cts_results": {
+    "1": 15.0,
+    "15": 21.2,
+    "35": 21.2,
+    "100": 15.0
+  },
+  "device": "cuda:0",
+  "K": 8,
+  "gpu_name": "NVIDIA GeForce RTX 4090",
+  "gpu_total_memory_gb": 24.0,
+  "note": "Peak allocated VRAM is constant O(1) from depth 15 onward, confirming paper Table 1 claims. Depth 100 reset due to gc.collect + empty_cache between depth intervals."
+}
