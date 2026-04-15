@@ -2,6 +2,9 @@
 
 Paper Remark 2: Inherited Jacobians warm-start non-root nodes,
 yielding average 11.2+-2.8 iterations (root: 14.8; non-root: 8.9).
+
+For small n (< MAX_DENSE_N), uses dense n×n Jacobian (fast, exact).
+For large n, uses Anderson Acceleration (memory-efficient, O(m*n)).
 """
 
 from __future__ import annotations
@@ -11,6 +14,8 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 
+MAX_DENSE_N = 8192
+
 
 @dataclass
 class BroydenInfo:
@@ -18,7 +23,7 @@ class BroydenInfo:
     residual_norm: float
     converged: bool
     all_residuals: List[float] = field(default_factory=list)
-    jacobian_state: Optional[Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]] = None
+    jacobian_state: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -98,28 +103,17 @@ def map_nu_ne_to_tol(nu_ne: float, tol_min: float, tol_max: float) -> float:
     return map_nu_tol_to_tol(nu_ne, tol_min, tol_max)
 
 
-def broyden_fixed_point(
+def _dense_broyden(
     phi: Callable[[torch.Tensor], torch.Tensor],
     z0: torch.Tensor,
     tol: float,
-    max_iter: int = 30,
-    *,
-    parent_inv_jacobian: Optional[Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]] = None,
-    fp32_buffer: bool = True,
-    memory_limit: int = 16,
+    max_iter: int,
+    parent_inv_jacobian: Optional[torch.Tensor],
+    fp32_buffer: bool,
+    memory_limit: int,
+    is_root: bool,
 ) -> Tuple[torch.Tensor, BroydenInfo]:
-    """L-Broyden fixed-point solver (paper §5.2).
-
-    Uses Broyden's method with limited-memory rank-1 updates.
-    FP32 compute buffer prevents BF16 numerical divergence.
-
-    Jacobian inheritance: parent_inv_jacobian = (B, s_list, y_list)
-    where B is the Jacobian approximation, s_list/y_list are update history.
-
-    Returns:
-        z_star: converged fixed point
-        info: BroydenInfo with .jacobian_state for child inheritance
-    """
+    """Dense Broyden for small n. Proven stable."""
     orig_shape = z0.shape
     device = z0.device
     compute_dtype = torch.float32 if fp32_buffer else z0.dtype
@@ -134,26 +128,20 @@ def broyden_fixed_point(
     Fv = F(z)
     residuals: List[float] = []
 
-    is_root = parent_inv_jacobian is None
-    if parent_inv_jacobian is not None:
-        B, inherited_s, inherited_y = parent_inv_jacobian
-        B = B.to(device=device, dtype=compute_dtype).clone()
-        if B.shape != (n, n):
-            B = torch.eye(n, device=device, dtype=compute_dtype)
-        update_s = [s.to(device=device, dtype=compute_dtype).clone() for s in inherited_s[-memory_limit:]]
-        update_y = [y.to(device=device, dtype=compute_dtype).clone() for y in inherited_y[-memory_limit:]]
+    if parent_inv_jacobian is not None and parent_inv_jacobian.shape == (n, n):
+        B = parent_inv_jacobian.to(device=device, dtype=compute_dtype).clone()
     else:
         B = torch.eye(n, device=device, dtype=compute_dtype)
-        update_s: List[torch.Tensor] = []
-        update_y: List[torch.Tensor] = []
+
+    update_s: List[torch.Tensor] = []
+    update_y: List[torch.Tensor] = []
 
     for it in range(max_iter):
         res = float(Fv.norm().item())
         residuals.append(res)
         if res < tol:
             z_out = z.view(orig_shape).to(z0.dtype)
-            jac_state = (B.detach().clone(), list(update_s), list(update_y))
-            info = BroydenInfo(it + 1, res, True, residuals, jacobian_state=jac_state)
+            info = BroydenInfo(it + 1, res, True, residuals, jacobian_state=B.detach().clone())
             if _global_stats is not None:
                 _global_stats.update(info, is_root=is_root)
             return z_out, info
@@ -172,18 +160,122 @@ def broyden_fixed_point(
         if len(update_s) >= memory_limit:
             update_s.pop(0)
             update_y.pop(0)
-        update_s.append(s.detach().clone())
-        update_y.append(y.detach().clone())
+        update_s.append(s.clone())
+        update_y.append(y.clone())
 
         B = B + torch.outer(y - B @ s, s) / denom
         z, Fv = z_new, F_new
 
     z_out = z.view(orig_shape).to(z0.dtype)
-    jac_state = (B.detach().clone(), list(update_s), list(update_y))
-    info = BroydenInfo(max_iter, float(Fv.norm().item()), False, residuals, jacobian_state=jac_state)
+    info = BroydenInfo(max_iter, float(Fv.norm().item()), False, residuals, jacobian_state=B.detach().clone())
     if _global_stats is not None:
         _global_stats.update(info, is_root=is_root)
     return z_out, info
+
+
+def _anderson_broyden(
+    phi: Callable[[torch.Tensor], torch.Tensor],
+    z0: torch.Tensor,
+    tol: float,
+    max_iter: int,
+    fp32_buffer: bool,
+    memory_limit: int,
+    is_root: bool,
+) -> Tuple[torch.Tensor, BroydenInfo]:
+    """Anderson acceleration for large n. O(m*n) memory."""
+    orig_shape = z0.shape
+    device = z0.device
+    compute_dtype = torch.float32 if fp32_buffer else z0.dtype
+    z = z0.detach().reshape(-1).to(device=device, dtype=compute_dtype).clone()
+
+    def G(vec: torch.Tensor) -> torch.Tensor:
+        zz = vec.to(z0.dtype).view(orig_shape)
+        p = phi(zz).reshape(-1).to(compute_dtype)
+        return p
+
+    residuals: List[float] = []
+    x_hist: List[torch.Tensor] = []
+    f_hist: List[torch.Tensor] = []
+    beta = 1.0
+
+    for it in range(max_iter):
+        fz = G(z)
+        res_vec = fz - z
+        res = float(res_vec.norm().item())
+        residuals.append(res)
+        if res < tol:
+            z_out = z.view(orig_shape).to(z0.dtype)
+            info = BroydenInfo(it + 1, res, True, residuals)
+            if _global_stats is not None:
+                _global_stats.update(info, is_root=is_root)
+            return z_out, info
+
+        x_hist.append(z.clone())
+        f_hist.append(fz.clone())
+        if len(x_hist) > memory_limit + 1:
+            x_hist.pop(0)
+            f_hist.pop(0)
+
+        m = len(f_hist)
+        if m < 2:
+            z = beta * fz + (1 - beta) * z
+            continue
+
+        dF = torch.stack([f_hist[i] - f_hist[i - 1] for i in range(1, m)], dim=0)  # [m-1, n]
+        dX = torch.stack([x_hist[i] - x_hist[i - 1] for i in range(1, m)], dim=0)  # [m-1, n]
+
+        gram = dF @ dF.t()
+        gram += 1e-6 * torch.eye(m - 1, device=device, dtype=compute_dtype)
+        rhs = dF @ res_vec
+
+        try:
+            gamma = torch.linalg.solve(gram, rhs)  # [m-1], small solve
+        except RuntimeError:
+            z = beta * fz + (1 - beta) * z
+            continue
+
+        z_new = fz - (gamma @ (dF - dX))
+        z = z_new
+
+    z_out = z.view(orig_shape).to(z0.dtype)
+    fz = G(z.reshape(-1).to(compute_dtype))
+    final_res = float((fz - z.reshape(-1).to(compute_dtype)).norm().item())
+    info = BroydenInfo(max_iter, final_res, False, residuals)
+    if _global_stats is not None:
+        _global_stats.update(info, is_root=is_root)
+    return z_out, info
+
+
+def broyden_fixed_point(
+    phi: Callable[[torch.Tensor], torch.Tensor],
+    z0: torch.Tensor,
+    tol: float,
+    max_iter: int = 30,
+    *,
+    parent_inv_jacobian: Optional[torch.Tensor] = None,
+    fp32_buffer: bool = True,
+    memory_limit: int = 16,
+) -> Tuple[torch.Tensor, BroydenInfo]:
+    """L-Broyden fixed-point solver (paper §5.2).
+
+    Automatically selects dense (small n) or Anderson (large n) mode.
+    Dense: O(n^2) memory, uses full Jacobian, proven stable.
+    Anderson: O(m*n) memory, uses history of m steps, scalable.
+
+    Paper rank = 16 (memory_limit default).
+    """
+    n = z0.numel()
+    is_root = parent_inv_jacobian is None
+
+    if n <= MAX_DENSE_N:
+        return _dense_broyden(
+            phi, z0, tol, max_iter, parent_inv_jacobian,
+            fp32_buffer, memory_limit, is_root,
+        )
+    else:
+        return _anderson_broyden(
+            phi, z0, tol, max_iter, fp32_buffer, memory_limit, is_root,
+        )
 
 
 def broyden_fixed_point_batch(
@@ -192,14 +284,13 @@ def broyden_fixed_point_batch(
     tol: float,
     max_iter: int = 30,
     *,
-    parent_inv_jacobian: Optional[Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]] = None,
+    parent_inv_jacobian: Optional[torch.Tensor] = None,
     fp32_buffer: bool = True,
     memory_limit: int = 16,
 ) -> Tuple[torch.Tensor, List[BroydenInfo]]:
     """Batch Broyden for W sibling branches (paper §4.1).
 
-    Each branch inherits the same parent_inv_jacobian and is solved
-    independently. phi evaluations can be batched for GPU efficiency.
+    Each branch inherits the same parent_inv_jacobian.
     """
     W = z0_batch.shape[0]
     results = []
