@@ -8,7 +8,7 @@ broyden_max_iter: 30
 broyden_tol_min: 1.0e-4
 broyden_tol_max: 1.0e-2
 broyden_fp32_buffer: true        # L-Broyden FP32 (paper §5.2)
-broyden_memory_limit: 10         # L-Broyden limited-memory rank-1 updates
+broyden_memory_limit: 16         # L-Broyden rank 16 (paper Table 1: ~0.12 GB FP32)
 latent_tokens_K: 64              # K=64 latent tokens (paper §4.2)
 
 # === MCTS (paper §4.1) ===
@@ -48,7 +48,8 @@ puct_variant: paper
 
 # === Stage 1 (paper §6.1) ===
 stage1_loss: fixed_point_residual  # IFT residual ||f(z*)-z*||^2
-stage1_max_steps: 2000
+stage1_max_steps: 5000            # paper §6.1: 5,000 steps
+stage1_lambda_lm: 0.1             # paper §6: 0.1 * L_CE (limits PPL increase to 0.4 nats)
 
 # === FAISS Latent Space Context Window (paper §4.4) ===
 faiss_enabled: true

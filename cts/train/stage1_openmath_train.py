@@ -58,6 +58,35 @@ def _maybe_apply_lora(
     return bb
 
 
+def _save_checkpoint(
+    bb: GemmaCTSBackbone,
+    opt: torch.optim.Optimizer,
+    *,
+    step: int,
+    total_steps: int,
+    config_name: str,
+    openmath_jsonl: str,
+    lora: bool,
+    losses: list[float],
+    path: Path,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "backbone_state_dict": bb.state_dict(),
+            "optimizer_state_dict": opt.state_dict(),
+            "step": step,
+            "total_steps": total_steps,
+            "config_name": config_name,
+            "openmath_jsonl": openmath_jsonl,
+            "lora": lora,
+            "losses": losses[-200:],
+        },
+        path,
+    )
+    print(f"  [checkpoint] saved step {step} → {path}")
+
+
 def run_stage1_openmath_training(
     *,
     openmath_jsonl: Path | str,
@@ -68,6 +97,8 @@ def run_stage1_openmath_training(
     lora_targets: Optional[list[str]] = None,
     log_every: int = 20,
     model_dir: Optional[str] = None,
+    resume: bool = False,
+    save_every: int = 500,
 ) -> Dict[str, Any]:
     cfg: Dict[str, Any] = load_config(config_name)
     apply_global_seed()
@@ -75,7 +106,7 @@ def run_stage1_openmath_training(
     if deq_from_cfg and not os.environ.get("CTS_DEQ_MAP_MODE"):
         os.environ["CTS_DEQ_MAP_MODE"] = str(deq_from_cfg)
     steps = int(
-        max_steps if max_steps is not None else cfg.get("stage1_max_steps", 2000)
+        max_steps if max_steps is not None else cfg.get("stage1_max_steps", 5000)
     )
     K = int(cfg.get("soft_thought_K", 8))
     nu = NuVector(nu_tol=0.5, nu_temp=1.0, nu_expl=1.0)
@@ -105,16 +136,32 @@ def run_stage1_openmath_training(
     params = [p for p in bb.parameters() if p.requires_grad]
     lr = float(cfg.get("lr", 3e-5))
     opt = torch.optim.AdamW(params, lr=lr)
-    scaler = torch.cuda.amp.GradScaler() if dev.type == "cuda" else None
+    scaler = torch.amp.GradScaler("cuda") if dev.type == "cuda" else None
+
+    start_step = 0
+    losses: list[float] = []
+    ckpt_path = Path("artifacts") / "stage1_last.pt"
+
+    if resume and ckpt_path.exists():
+        print(f"Resuming from {ckpt_path} ...")
+        ckpt = torch.load(ckpt_path, map_location=dev, weights_only=False)
+        bb.load_state_dict(ckpt["backbone_state_dict"], strict=False)
+        if "optimizer_state_dict" in ckpt:
+            try:
+                opt.load_state_dict(ckpt["optimizer_state_dict"])
+            except Exception:
+                print("  [warn] optimizer state incompatible, resetting optimizer")
+        start_step = ckpt.get("step", 0)
+        losses = ckpt.get("losses", [])
+        print(f"  Resumed at step {start_step}, continuing to {steps}")
 
     path = Path(openmath_jsonl)
     if not path.is_file():
         raise FileNotFoundError(f"OpenMath JSONL not found: {path}")
 
     row_iter = iter_jsonl(path)
-    losses: list[float] = []
 
-    for step in range(steps):
+    for step in range(start_step, steps):
         try:
             row = next(row_iter)
         except StopIteration:
@@ -132,10 +179,12 @@ def run_stage1_openmath_training(
             "deq_map_mode": bb.deq_map_mode,
         }
 
+        lambda_lm = float(cfg.get("stage1_lambda_lm", 0.1))
         if scaler is not None:
-            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 loss = fixed_point_surrogate_loss(
-                    bb, text, z, nu, w_g=w_g, extra=extra
+                    bb, text, z, nu, w_g=w_g, extra=extra,
+                    lambda_lm=lambda_lm, tokenizer=tok,
                 )
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
@@ -145,7 +194,10 @@ def run_stage1_openmath_training(
             scaler.step(opt)
             scaler.update()
         else:
-            loss = fixed_point_surrogate_loss(bb, text, z, nu, w_g=w_g, extra=extra)
+            loss = fixed_point_surrogate_loss(
+                bb, text, z, nu, w_g=w_g, extra=extra,
+                lambda_lm=lambda_lm, tokenizer=tok,
+            )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(
                 params, float(cfg.get("max_grad_norm", 1.0))
@@ -158,21 +210,21 @@ def run_stage1_openmath_training(
             tail = sum(losses[-log_every:]) / min(len(losses), log_every)
             print(f"stage1 step={step + 1}/{steps} loss={lv:.6f} avg_last={tail:.6f}")
 
-    out_path = Path("artifacts") / "stage1_last.pt"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "backbone_state_dict": bb.state_dict(),
-            "config_name": config_name,
-            "steps": steps,
-            "openmath_jsonl": str(path),
-            "lora": lora,
-        },
-        out_path,
+        if save_every and (step + 1) % save_every == 0:
+            _save_checkpoint(
+                bb, opt, step=step + 1, total_steps=steps,
+                config_name=config_name, openmath_jsonl=str(path),
+                lora=lora, losses=losses, path=ckpt_path,
+            )
+
+    _save_checkpoint(
+        bb, opt, step=steps, total_steps=steps,
+        config_name=config_name, openmath_jsonl=str(path),
+        lora=lora, losses=losses, path=ckpt_path,
     )
-    print("Wrote checkpoint", out_path)
+    print(f"Stage 1 complete: {steps} steps, final loss={losses[-1]:.6f}")
     return {
-        "checkpoint": str(out_path),
+        "checkpoint": str(ckpt_path),
         "final_loss": losses[-1] if losses else 0.0,
         "steps": steps,
     }

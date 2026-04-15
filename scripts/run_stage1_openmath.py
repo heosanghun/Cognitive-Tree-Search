@@ -28,6 +28,8 @@ def main() -> None:
     p.add_argument("--no-lora", dest="lora", action="store_false",
                    help="Disable LoRA (ablation only)")
     p.add_argument("--log-every", type=int, default=20)
+    p.add_argument("--save-every", type=int, default=500, help="Save checkpoint every N steps")
+    p.add_argument("--resume", action="store_true", help="Resume from artifacts/stage1_last.pt")
     p.add_argument("--model-dir", type=str, default=None, help="Override CTS_GEMMA_MODEL_DIR")
     args = p.parse_args()
 
@@ -52,6 +54,8 @@ def main() -> None:
         lora=args.lora,
         log_every=args.log_every,
         model_dir=args.model_dir,
+        resume=args.resume,
+        save_every=args.save_every,
     )
 
 

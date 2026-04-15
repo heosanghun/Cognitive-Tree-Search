@@ -1,17 +1,24 @@
-"""CTS transition API: DEQ fixed point + FAISS context + batch + ACT (paper §4)."""
+"""CTS transition API: DEQ fixed point + FAISS context + batch + ACT (paper §4).
+
+Algorithm 1 alignment:
+  - Line 6: z_tilde_w = z*_parent + epsilon_w  (parent z* + noise, NOT random init)
+  - Line 9: fallback on non-convergence: revert to parent z*, Q <- 0
+  - Line 10: L-Broyden inverse Jacobian inheritance via (Us, VTs)
+"""
 
 from __future__ import annotations
 
 import json
 import inspect
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 
 from cts.backbone.protocol import BaseCTSBackbone
 from cts.deq.broyden_forward import (
+    BroydenInfo,
     broyden_fixed_point,
     broyden_fixed_point_batch,
     map_nu_tol_to_tol,
@@ -48,12 +55,16 @@ def transition(
     max_decode_tokens: int = 1,
     faiss_context: Optional[LatentContextWindow] = None,
     fp32_buffer: bool = True,
-    parent_inv_jacobian: Optional[torch.Tensor] = None,
+    parent_inv_jacobian: Optional[Tuple[torch.Tensor, torch.Tensor, int]] = None,
+    parent_z_star: Optional[torch.Tensor] = None,
+    noise_sigma: float = 0.02,
 ) -> TransitionResult:
-    """
-    One KV-cache-free transition using DEQ (paper §4.2).
-    Supports FAISS Latent Context Window (§4.4) and L-Broyden FP32 (§5.2).
-    Parent inverse Jacobian inheritance accelerates convergence (§5.2).
+    """One KV-cache-free transition using DEQ (paper §4.2).
+
+    Paper Algorithm 1 alignment:
+      Line 6:  {z_tilde_w} <- z*_s + epsilon_w
+      Line 9:  fallback: revert to parent z*, Q <- 0
+      Line 10: L-Broyden-Update inherits parent inverse Jacobian
     """
     if isinstance(backbone, nn.Module):
         device = next(backbone.parameters()).device
@@ -63,15 +74,22 @@ def transition(
     gen = generator or torch.Generator(device=device)
     gen.manual_seed(2026 + branch_index * 31 + (len(parent_text) % 997))
 
-    z0 = init_z0(K, d, device, gen)
-    z0 = add_exploration_noise(z0, nu.nu_expl, gen)
+    # Algorithm 1 line 6: z_tilde_w = z*_parent + epsilon_w
+    if parent_z_star is not None:
+        pz = parent_z_star.detach().to(device=device, dtype=torch.float32)
+        if pz.shape[0] != K or pz.shape[-1] != d:
+            pz = init_z0(K, d, device, gen)
+        epsilon = torch.randn(K, d, device=device, dtype=torch.float32, generator=gen) * noise_sigma * nu.nu_expl
+        z0 = pz + epsilon
+    else:
+        z0 = init_z0(K, d, device, gen)
+        z0 = add_exploration_noise(z0, nu.nu_expl, gen)
 
     context = backbone.encode_context(parent_text)
     if context.dim() == 1:
         context = context.unsqueeze(0)
     context = context.to(device=device, dtype=torch.float32)
 
-    # FAISS Latent Space Context Window (paper §4.4)
     faiss_retrieved = None
     if faiss_context is not None:
         faiss_retrieved_raw = faiss_context.retrieve(z0, k=3)
@@ -95,9 +113,14 @@ def transition(
         return backbone.deq_step(zz, context, mw, extra)
 
     tol = map_nu_tol_to_tol(nu.nu_tol, broyden_tol_min, broyden_tol_max)
+
+    inherited_jac = None
+    if parent_inv_jacobian is not None:
+        inherited_jac = parent_inv_jacobian
+
     z_star, info = broyden_fixed_point(
         phi, z0, tol=tol, max_iter=broyden_max_iter, fp32_buffer=fp32_buffer,
-        parent_inv_jacobian=parent_inv_jacobian,
+        parent_inv_jacobian=inherited_jac,
     )
 
     budget = budget.clone()
@@ -126,10 +149,12 @@ def transition(
         "phi_evals_per_broyden_iter": phi_evals_per_broyden_iter,
     }
 
+    # Algorithm 1 line 9: fallback on non-convergence → revert to parent z*, Q <- 0
     if not info.converged:
+        fallback_z = parent_z_star.detach().clone().to(device) if parent_z_star is not None else z_star
         return TransitionResult(
             child_text=None,
-            z_star_child=z_star,
+            z_star_child=fallback_z,
             solver_stats=solver_stats,
             prune=True,
             budget=budget,
@@ -139,7 +164,6 @@ def transition(
     if budget.mac_accumulated > tau_flops_budget * nu.nu_act:
         solver_stats["act_halt"] = True
 
-    # Add z* to FAISS context window
     if faiss_context is not None:
         faiss_context.add(z_star)
 
@@ -188,12 +212,13 @@ def transition_batch(
     max_decode_tokens: int = 1,
     faiss_context: Optional[LatentContextWindow] = None,
     fp32_buffer: bool = True,
-    parent_inv_jacobian: Optional[torch.Tensor] = None,
+    parent_inv_jacobian: Optional[Tuple[torch.Tensor, torch.Tensor, int]] = None,
+    parent_z_star: Optional[torch.Tensor] = None,
+    noise_sigma: float = 0.02,
 ) -> List[TransitionResult]:
     """Paper §4.1: parallel batch DEQ for W sibling branches.
 
-    W branches are evaluated as a single parallel batch during the DEQ solve,
-    maintaining ~25ms latency irrespective of branching width (paper §4.1).
+    Algorithm 1 aligned: uses parent_z_star for initialization and fallback.
     """
     if isinstance(backbone, nn.Module):
         device = next(backbone.parameters()).device
@@ -207,9 +232,8 @@ def transition_batch(
     context = context.to(device=device, dtype=torch.float32)
 
     if faiss_context is not None:
-        faiss_retrieved_raw = faiss_context.retrieve(
-            init_z0(K, d_actual, device, torch.Generator(device=device)), k=3
-        )
+        query_z = parent_z_star if parent_z_star is not None else init_z0(K, d_actual, device, torch.Generator(device=device))
+        faiss_retrieved_raw = faiss_context.retrieve(query_z, k=3)
         if faiss_retrieved_raw is not None:
             context = prepend_soft_prefix(context, faiss_retrieved_raw)
 
@@ -224,16 +248,23 @@ def transition_batch(
     for bi in range(W):
         gen = torch.Generator(device=device)
         gen.manual_seed(2026 + bi * 31 + (len(parent_text) % 997))
-        z0 = init_z0(K, d_actual, device, gen)
-        z0 = add_exploration_noise(z0, nu.nu_expl, gen)
-        z0_list.append(z0)
+        if parent_z_star is not None:
+            pz = parent_z_star.detach().to(device=device, dtype=torch.float32)
+            if pz.shape[0] != K or pz.shape[-1] != d_actual:
+                pz = init_z0(K, d_actual, device, gen)
+            epsilon = torch.randn(K, d_actual, device=device, dtype=torch.float32, generator=gen) * noise_sigma * nu.nu_expl
+            z0_list.append(pz + epsilon)
+        else:
+            z0 = init_z0(K, d_actual, device, gen)
+            z0 = add_exploration_noise(z0, nu.nu_expl, gen)
+            z0_list.append(z0)
 
     def phi(zz: torch.Tensor) -> torch.Tensor:
         alpha = routing_weights(zz, w_g, nu.nu_temp)
         mw = alpha if routing_mode == "dense" else sparse_module_weights(alpha, top_k)
         return backbone.deq_step(zz, context, mw, {"top_k": top_k})
 
-    z0_batch = torch.stack(z0_list, dim=0)  # [W, K, d]
+    z0_batch = torch.stack(z0_list, dim=0)
     z_star_batch, infos = broyden_fixed_point_batch(
         phi, z0_batch, tol=tol, max_iter=broyden_max_iter,
         fp32_buffer=fp32_buffer, parent_inv_jacobian=parent_inv_jacobian,
@@ -260,8 +291,9 @@ def transition_batch(
         }
 
         if not info.converged:
+            fallback_z = parent_z_star.detach().clone().to(device) if parent_z_star is not None else z_star
             results.append(TransitionResult(
-                child_text=None, z_star_child=z_star, solver_stats=solver_stats,
+                child_text=None, z_star_child=fallback_z, solver_stats=solver_stats,
                 prune=True, budget=b,
             ))
             continue

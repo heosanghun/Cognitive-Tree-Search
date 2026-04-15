@@ -1,16 +1,17 @@
-"""
-Gemma 4 E4B backbone for CTS (paper-aligned paths).
+"""Gemma 4 E4B backbone for CTS (paper §4.3, §5, §6).
 
-- encode_context: Gemma4Model text-only forward, mean-pooled anchor (RoPE on s_t in HF).
-  **RoPE / inner-z:** Single source of truth for the **API contract** is `cts.backbone.rope_contract`.
-  HF 단일 `forward`만으로는 inner block에 대한 “커스텀 position_ids”가 필요 없는 경로로
-  앵커는 `encode_context`, latent는 `deq_step`로 분리한다. Optional Phase-2 HF hook은
-  `rope_contract.phase2_custom_forward_available()`.
-- deq_step: configurable (`CTS_DEQ_MAP_MODE`) —
-    * `blend` (**default**): 가벼운 어댑터만 사용 → Broyden·파이프라인 동작 확인용(권장 1단계).
-    * `parallel`: Eq.(5) 스타일 희소 병렬 모듈(무거움, GPU 권장 2단계).
-    * `full`: 42층 전체 순차 1패스(애블레이션).
-- routing_proj: learnable W_g [19, H] for alpha = softmax(W_g @ pool(z) / nu_ACh).
+Key components:
+- encode_context: text -> mean-pooled anchor embedding
+- deq_step: configurable DEQ map (blend/parallel/full)
+- routing_proj: W_g [19, H] for sparse module routing (Eq. 3)
+- w_proj: Wproj [d, d_model] learned projection (§4.3)
+- decode_from_z_star: Wproj soft-prompt prefix -> frozen AR pass (§4.3)
+
+Paper §4.3: "Terminal z* is projected via Wproj in R^{d x d_model} as a
+soft-prompt prefix into the frozen Gemma 4 decoder for one autoregressive
+pass (~1.2 s)."
+
+Paper §6: Wproj is trained jointly in Stage 1.
 """
 
 from __future__ import annotations
@@ -36,13 +37,17 @@ class GemmaCTSBackbone(BaseCTSBackbone, nn.Module):
         self._num_layers = int(cfg.num_hidden_layers)
         dev = next(cg_model.parameters()).device
         dt = next(cg_model.parameters()).dtype
-        # Paper Eq.(5): W_g for routing logits (trainable in Stage 2).
         self.routing_proj = nn.Parameter(torch.randn(19, self._hidden, device=dev, dtype=dt) * 0.02)
-        # Legacy fast path
         self._blend = nn.Linear(self._hidden, self._hidden, bias=True).to(device=dev)
         nn.init.normal_(self._blend.weight, std=0.02)
         nn.init.zeros_(self._blend.bias)
-        # parallel | full | blend — 기본은 blend(동작 확인 후 parallel 권장)
+
+        # Paper §4.3: Wproj in R^{d x d_model} — projects z* [K, d] into
+        # embedding space for soft-prompt prefix decoding.
+        # Trained jointly in Stage 1.
+        self.w_proj = nn.Linear(self._hidden, self._hidden, bias=False).to(device=dev, dtype=dt)
+        nn.init.normal_(self.w_proj.weight, std=0.02)
+
         self.deq_map_mode = os.environ.get("CTS_DEQ_MAP_MODE", "blend")
 
     @property
@@ -57,7 +62,6 @@ class GemmaCTSBackbone(BaseCTSBackbone, nn.Module):
         return next(self.cg.parameters()).device
 
     def routing_matrix(self) -> torch.Tensor:
-        """W_g in paper (19 x H)."""
         return self.routing_proj
 
     def encode_context(self, parent_text: str) -> torch.Tensor:
@@ -103,12 +107,7 @@ class GemmaCTSBackbone(BaseCTSBackbone, nn.Module):
         if mode in ("parallel", "paper"):
             lm = self._lm()
             out = parallel_sparse_module_forward(
-                lm,
-                z,
-                ctx,
-                module_weights,
-                layers_for_module,
-                top_k=top_k,
+                lm, z, ctx, module_weights, layers_for_module, top_k=top_k,
             )
             return out.to(dtype=z.dtype)
 
@@ -116,7 +115,6 @@ class GemmaCTSBackbone(BaseCTSBackbone, nn.Module):
             out = full_stack_forward(self._lm(), z, ctx)
             return out.to(dtype=z.dtype)
 
-        # blend fallback
         zf = z.float()
         ctxf = ctx.float().expand(zf.shape[0], -1)
         gate = float(module_weights.sum().item() / max(module_weights.numel(), 1))
@@ -126,60 +124,66 @@ class GemmaCTSBackbone(BaseCTSBackbone, nn.Module):
         mixed = 0.82 * zf + 0.18 * gate * torch.tanh(delta)
         return mixed.to(dtype=z.dtype)
 
-    def decode_from_z_star(self, z_star: torch.Tensor, *, max_new_tokens: int = 1) -> str:
-        """
-        Decode from fixed-point latent z* [K, H].
-        `max_new_tokens==1`: single greedy token via lm_head (cheap).
-        `max_new_tokens>1`: causal AR from pooled z as first `inputs_embeds` step, then KV cache.
+    def decode_from_z_star(self, z_star: torch.Tensor, *, max_new_tokens: int = 64) -> str:
+        """Paper §4.3: Wproj soft-prompt prefix -> frozen Gemma AR pass.
+
+        z_star [K, d] -> Wproj -> [K, d_model] soft-prompt prefix
+        -> frozen Gemma autoregressive decoding -> answer text
+
+        Because final decoding uses W=1, KV-cache collapses to O(L).
+        Peak VRAM stays below 18.0 GB (paper §4.3).
         """
         if max_new_tokens <= 0:
             return ""
         dt = next(self.cg.parameters()).dtype
         device = self._device()
-        if max_new_tokens == 1:
-            h = z_star.mean(dim=0).to(dtype=dt)
-            logits = self.cg.lm_head(h.unsqueeze(0)).squeeze(0)
-            tid = int(logits.argmax(dim=-1).item())
-            return self.tokenizer.decode([tid], skip_special_tokens=True)
 
-        z0 = z_star.mean(dim=0).to(dtype=dt).view(1, 1, -1)
-        attn = torch.ones(1, 1, device=device, dtype=torch.long)
+        # Project z* through Wproj: [K, d] -> [K, d_model]
+        z_projected = self.w_proj(z_star.to(dtype=dt))
+        prefix_embeds = z_projected.unsqueeze(0)  # [1, K, d_model]
+        prefix_len = prefix_embeds.shape[1]
+
         eos = getattr(self.tokenizer, "eos_token_id", None)
         if eos is None:
             try:
                 eos = int(self.cg.config.get_text_config().eos_token_id)
             except Exception:
                 eos = 1
+
         ids: List[int] = []
         try:
             with torch.no_grad():
-                past = None
-                for step in range(max_new_tokens):
-                    if step == 0:
-                        out = self.cg.model(
-                            inputs_embeds=z0,
-                            attention_mask=attn,
-                            use_cache=True,
-                            return_dict=True,
-                        )
-                    else:
-                        tid_t = torch.tensor([[ids[-1]]], device=device, dtype=torch.long)
-                        out = self.cg.model(
-                            input_ids=tid_t,
-                            past_key_values=past,
-                            use_cache=True,
-                            return_dict=True,
-                        )
+                attn_mask = torch.ones(1, prefix_len, device=device, dtype=torch.long)
+                out = self.cg.model(
+                    inputs_embeds=prefix_embeds,
+                    attention_mask=attn_mask,
+                    use_cache=True,
+                    return_dict=True,
+                )
+                past = out.past_key_values
+                h = out.last_hidden_state[:, -1, :]
+                logits = self.cg.lm_head(h)
+                next_id = int(logits.argmax(dim=-1).item())
+                ids.append(next_id)
+
+                for _ in range(max_new_tokens - 1):
+                    if next_id == eos:
+                        break
+                    tid_t = torch.tensor([[next_id]], device=device, dtype=torch.long)
+                    out = self.cg.model(
+                        input_ids=tid_t,
+                        past_key_values=past,
+                        use_cache=True,
+                        return_dict=True,
+                    )
                     past = out.past_key_values
                     h = out.last_hidden_state[:, -1, :]
                     logits = self.cg.lm_head(h)
                     next_id = int(logits.argmax(dim=-1).item())
                     ids.append(next_id)
-                    if next_id == eos:
-                        break
+
             return self.tokenizer.decode(ids, skip_special_tokens=True)
         except Exception:
-            # Fallback: single-token path if multimodal forward rejects inputs_embeds-only
             h = z_star.mean(dim=0).to(dtype=dt)
             logits = self.cg.lm_head(h.unsqueeze(0)).squeeze(0)
             tid = int(logits.argmax(dim=-1).item())

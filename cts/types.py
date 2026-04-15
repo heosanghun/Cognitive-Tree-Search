@@ -1,28 +1,72 @@
-"""Core CTS datatypes aligned with paper §2.3: ν = [νval, νexpl, νtol, νtemp, νact]."""
+"""Core CTS datatypes aligned with paper §4.1.
+
+Paper §4.1: nu = [nu_expl, nu_tol, nu_temp, nu_act] in R^4.
+V(z*) is separate Neuro-Critic output, NOT part of nu.
+
+Paper Table 5: nu-component Pareto configurations:
+  CTS-4nu: all active {expl, tol, temp, act}
+  CTS-2nu: {expl, temp} active; tol, act fixed at Stage 1 converged means
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, FrozenSet, List, Literal, Optional, Set
 
 import torch
 
 
+# Paper Table 5: nu-configuration Pareto modes
+NuConfigMode = Literal["4nu", "3nu_no_act", "2nu_expl_tol", "2nu_fast", "1nu"]
+
+NU_CONFIG_ACTIVE: Dict[NuConfigMode, FrozenSet[str]] = {
+    "4nu": frozenset({"expl", "tol", "temp", "act"}),
+    "3nu_no_act": frozenset({"expl", "tol", "temp"}),
+    "2nu_expl_tol": frozenset({"expl", "tol"}),
+    "2nu_fast": frozenset({"expl", "temp"}),
+    "1nu": frozenset({"expl"}),
+}
+
+# Stage 1 converged means (paper Table 5 footnote)
+NU_STAGE1_DEFAULTS: Dict[str, float] = {
+    "tol": 5e-3,
+    "act": 0.78,
+    "temp": 1.0,
+    "expl": 1.0,
+}
+
+
 @dataclass
 class NuVector:
-    """Meta-policy output per step (paper §2.3).
+    """Meta-policy output per step (paper §4.1).
 
-    Paper naming: νval (state value), νexpl (exploration rate),
-    νtol (solver tolerance), νtemp (routing temperature), νact (ACT halting).
+    nu = [nu_expl, nu_tol, nu_temp, nu_act] in R^4.
+    nu_val is kept for backward compatibility but is NOT part of the
+    paper's nu vector — V(z*) comes from separate Neuro-Critic.
     """
 
     nu_val: float = 1.0
     nu_expl: float = 1.0
-    nu_tol: float = 0.5  # maps to Broyden tol in [tol_min, tol_max]
+    nu_tol: float = 0.5
     nu_temp: float = 1.0
     nu_act: float = 1.0
 
-    # Backward-compatible aliases (legacy neurotransmitter names)
+    def apply_config(self, mode: NuConfigMode) -> "NuVector":
+        """Apply nu-config mode: fix inactive operators to Stage 1 means.
+
+        Paper Table 5: "Fixed nu: set to Stage 1 converged mean; no inference
+        overhead. All configurations exceed Native Think (42.5%). No retraining
+        required for mode switching."
+        """
+        active = NU_CONFIG_ACTIVE[mode]
+        return NuVector(
+            nu_val=self.nu_val,
+            nu_expl=self.nu_expl if "expl" in active else NU_STAGE1_DEFAULTS["expl"],
+            nu_tol=self.nu_tol if "tol" in active else NU_STAGE1_DEFAULTS["tol"],
+            nu_temp=self.nu_temp if "temp" in active else NU_STAGE1_DEFAULTS["temp"],
+            nu_act=self.nu_act if "act" in active else NU_STAGE1_DEFAULTS["act"],
+        )
+
     @property
     def nu_da(self) -> float:
         return self.nu_val
@@ -53,7 +97,6 @@ class RuntimeBudgetState:
     flops_spent_step: float = 0.0
     wall_clock_ms_step: float = 0.0
 
-    # Backward-compatible alias
     @property
     def ado_accumulated(self) -> float:
         return self.mac_accumulated

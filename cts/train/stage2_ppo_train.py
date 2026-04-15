@@ -125,7 +125,9 @@ def run_stage2_math_ppo(
     lambda_halt = float(cfg.get("act_halting_penalty", 0.05))
     gae_gamma = float(cfg.get("discount_gamma", 0.99))
     gae_lam = float(cfg.get("gae_lambda", 0.95))
-    K = int(cfg.get("latent_tokens_K", K))
+    K_cfg = cfg.get("latent_tokens_K")
+    if K_cfg is not None and K == 64:
+        K = int(K_cfg)
 
     path = Path(math_prompts_jsonl)
     if not path.is_file():
