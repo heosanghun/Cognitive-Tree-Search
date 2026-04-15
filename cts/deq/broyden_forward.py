@@ -18,7 +18,7 @@ class BroydenInfo:
     residual_norm: float
     converged: bool
     all_residuals: List[float] = field(default_factory=list)
-    jacobian_state: Optional[Tuple[torch.Tensor, torch.Tensor, int]] = None
+    jacobian_state: Optional[Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]] = None
 
 
 @dataclass
@@ -98,32 +98,27 @@ def map_nu_ne_to_tol(nu_ne: float, tol_min: float, tol_max: float) -> float:
     return map_nu_tol_to_tol(nu_ne, tol_min, tol_max)
 
 
-def _matvec(Us: torch.Tensor, VTs: torch.Tensor, m: int, x: torch.Tensor) -> torch.Tensor:
-    """Compute (U @ V^T) @ x using stored rank-1 factors. O(m*n)."""
-    if m == 0:
-        return torch.zeros_like(x)
-    return Us[:, :m] @ (VTs[:m] @ x)
-
-
 def broyden_fixed_point(
     phi: Callable[[torch.Tensor], torch.Tensor],
     z0: torch.Tensor,
     tol: float,
     max_iter: int = 30,
     *,
-    parent_inv_jacobian: Optional[Tuple[torch.Tensor, torch.Tensor, int]] = None,
+    parent_inv_jacobian: Optional[Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]] = None,
     fp32_buffer: bool = True,
     memory_limit: int = 16,
 ) -> Tuple[torch.Tensor, BroydenInfo]:
     """L-Broyden fixed-point solver (paper §5.2).
 
-    Paper Algorithm 1 line 10: L-Broyden-Update(B_s, z*_w)
-    Inherits parent inverse Jacobian via (Us, VTs, n_stored) tuple.
+    Uses Broyden's method with limited-memory rank-1 updates.
+    FP32 compute buffer prevents BF16 numerical divergence.
+
+    Jacobian inheritance: parent_inv_jacobian = (B, s_list, y_list)
+    where B is the Jacobian approximation, s_list/y_list are update history.
 
     Returns:
         z_star: converged fixed point
-        info: BroydenInfo with .jacobian_state = (Us, VTs, n_stored)
-              for inheritance by child nodes
+        info: BroydenInfo with .jacobian_state for child inheritance
     """
     orig_shape = z0.shape
     device = z0.device
@@ -131,73 +126,61 @@ def broyden_fixed_point(
     z = z0.detach().reshape(-1).to(device=device, dtype=compute_dtype).clone()
     n = z.numel()
 
-    def G(vec: torch.Tensor) -> torch.Tensor:
+    def F(vec: torch.Tensor) -> torch.Tensor:
         zz = vec.to(z0.dtype).view(orig_shape)
         p = phi(zz).reshape(-1).to(compute_dtype)
         return vec - p
 
-    gx = G(z)
+    Fv = F(z)
     residuals: List[float] = []
 
-    # Inherit parent Jacobian state or initialize fresh
     is_root = parent_inv_jacobian is None
     if parent_inv_jacobian is not None:
-        p_Us, p_VTs, p_n = parent_inv_jacobian
-        Us = p_Us.to(device=device, dtype=compute_dtype).clone()
-        VTs = p_VTs.to(device=device, dtype=compute_dtype).clone()
-        n_stored = min(p_n, memory_limit)
-        if Us.shape[0] != n or Us.shape[1] < memory_limit:
-            Us = torch.zeros(n, memory_limit, device=device, dtype=compute_dtype)
-            VTs = torch.zeros(memory_limit, n, device=device, dtype=compute_dtype)
-            n_stored = 0
+        B, inherited_s, inherited_y = parent_inv_jacobian
+        B = B.to(device=device, dtype=compute_dtype).clone()
+        if B.shape != (n, n):
+            B = torch.eye(n, device=device, dtype=compute_dtype)
+        update_s = [s.to(device=device, dtype=compute_dtype).clone() for s in inherited_s[-memory_limit:]]
+        update_y = [y.to(device=device, dtype=compute_dtype).clone() for y in inherited_y[-memory_limit:]]
     else:
-        Us = torch.zeros(n, memory_limit, device=device, dtype=compute_dtype)
-        VTs = torch.zeros(memory_limit, n, device=device, dtype=compute_dtype)
-        n_stored = 0
+        B = torch.eye(n, device=device, dtype=compute_dtype)
+        update_s: List[torch.Tensor] = []
+        update_y: List[torch.Tensor] = []
 
     for it in range(max_iter):
-        res = float(gx.norm().item())
+        res = float(Fv.norm().item())
         residuals.append(res)
         if res < tol:
             z_out = z.view(orig_shape).to(z0.dtype)
-            jac_state = (Us.detach().clone(), VTs.detach().clone(), n_stored)
+            jac_state = (B.detach().clone(), list(update_s), list(update_y))
             info = BroydenInfo(it + 1, res, True, residuals, jacobian_state=jac_state)
             if _global_stats is not None:
                 _global_stats.update(info, is_root=is_root)
             return z_out, info
 
-        dx = gx - _matvec(Us, VTs, n_stored, gx)
+        try:
+            step = torch.linalg.solve(B, -Fv)
+        except RuntimeError:
+            step = -Fv
 
-        z_new = z + dx
-        gx_new = G(z_new)
+        z_new = z + step
+        F_new = F(z_new)
+        s = z_new - z
+        y = F_new - Fv
+        denom = torch.dot(s, s).clamp_min(1e-12)
 
-        dg = gx_new - gx
-        B_dg = -dg + _matvec(Us, VTs, n_stored, dg)
+        if len(update_s) >= memory_limit:
+            update_s.pop(0)
+            update_y.pop(0)
+        update_s.append(s.detach().clone())
+        update_y.append(y.detach().clone())
 
-        denom = torch.dot(dx, B_dg)
-        if abs(float(denom)) < 1e-12:
-            z, gx = z_new, gx_new
-            continue
-
-        u_new = (dx - B_dg) / denom
-
-        if n_stored > 0:
-            ut_dx = Us[:, :n_stored].t() @ dx
-            v_new = -dx + VTs[:n_stored].t() @ ut_dx
-        else:
-            v_new = -dx.clone()
-
-        idx = n_stored % memory_limit
-        Us[:, idx] = u_new
-        VTs[idx] = v_new
-        if n_stored < memory_limit:
-            n_stored += 1
-
-        z, gx = z_new, gx_new
+        B = B + torch.outer(y - B @ s, s) / denom
+        z, Fv = z_new, F_new
 
     z_out = z.view(orig_shape).to(z0.dtype)
-    jac_state = (Us.detach().clone(), VTs.detach().clone(), n_stored)
-    info = BroydenInfo(max_iter, float(gx.norm().item()), False, residuals, jacobian_state=jac_state)
+    jac_state = (B.detach().clone(), list(update_s), list(update_y))
+    info = BroydenInfo(max_iter, float(Fv.norm().item()), False, residuals, jacobian_state=jac_state)
     if _global_stats is not None:
         _global_stats.update(info, is_root=is_root)
     return z_out, info
@@ -209,109 +192,28 @@ def broyden_fixed_point_batch(
     tol: float,
     max_iter: int = 30,
     *,
-    parent_inv_jacobian: Optional[Tuple[torch.Tensor, torch.Tensor, int]] = None,
+    parent_inv_jacobian: Optional[Tuple[torch.Tensor, List[torch.Tensor], List[torch.Tensor]]] = None,
     fp32_buffer: bool = True,
     memory_limit: int = 16,
 ) -> Tuple[torch.Tensor, List[BroydenInfo]]:
-    """True batched Broyden for W sibling branches (paper §4.1).
+    """Batch Broyden for W sibling branches (paper §4.1).
 
-    All W branches share one batched phi evaluation per iteration.
-    z0_batch: [W, K, d]  -> z_star_batch: [W, K, d]
+    Each branch inherits the same parent_inv_jacobian and is solved
+    independently. phi evaluations can be batched for GPU efficiency.
     """
     W = z0_batch.shape[0]
-    orig_shape_per = z0_batch.shape[1:]  # [K, d]
-    device = z0_batch.device
-    compute_dtype = torch.float32 if fp32_buffer else z0_batch.dtype
-
-    n = int(torch.tensor(orig_shape_per).prod().item())  # K * d
-
-    z = z0_batch.detach().reshape(W, -1).to(dtype=compute_dtype).clone()  # [W, n]
-
-    def G_batch(vecs: torch.Tensor) -> torch.Tensor:
-        """Residual for all W branches at once. vecs: [W, n]."""
-        zz = vecs.to(z0_batch.dtype).view(W, *orig_shape_per)
-        results = []
-        for i in range(W):
-            p_i = phi(zz[i]).reshape(-1).to(compute_dtype)
-            results.append(vecs[i] - p_i)
-        return torch.stack(results)
-
-    gx = G_batch(z)  # [W, n]
-
-    Us = torch.zeros(W, n, memory_limit, device=device, dtype=compute_dtype)
-    VTs = torch.zeros(W, memory_limit, n, device=device, dtype=compute_dtype)
-    n_stored = [0] * W
-
-    is_root = parent_inv_jacobian is None
-    if parent_inv_jacobian is not None:
-        p_Us, p_VTs, p_n = parent_inv_jacobian
-        for w in range(W):
-            if p_Us.shape[0] == n and p_Us.shape[1] >= memory_limit:
-                Us[w] = p_Us.to(dtype=compute_dtype).clone()
-                VTs[w] = p_VTs.to(dtype=compute_dtype).clone()
-                n_stored[w] = min(p_n, memory_limit)
-
-    converged = [False] * W
-    residuals_all: List[List[float]] = [[] for _ in range(W)]
-    final_iters = [max_iter] * W
-
-    for it in range(max_iter):
-        res_norms = gx.norm(dim=1)  # [W]
-        for w in range(W):
-            res_w = float(res_norms[w].item())
-            residuals_all[w].append(res_w)
-            if not converged[w] and res_w < tol:
-                converged[w] = True
-                final_iters[w] = it + 1
-
-        if all(converged):
-            break
-
-        dx = torch.zeros_like(z)
-        for w in range(W):
-            if converged[w]:
-                continue
-            m = n_stored[w]
-            mv = _matvec(Us[w], VTs[w], m, gx[w])
-            dx[w] = gx[w] - mv
-
-        z_new = z + dx
-        gx_new = G_batch(z_new)
-
-        for w in range(W):
-            if converged[w]:
-                continue
-            dg_w = gx_new[w] - gx[w]
-            m = n_stored[w]
-            B_dg = -dg_w + _matvec(Us[w], VTs[w], m, dg_w)
-            denom = torch.dot(dx[w], B_dg)
-            if abs(float(denom)) < 1e-12:
-                continue
-            u_new = (dx[w] - B_dg) / denom
-            if m > 0:
-                ut_dx = Us[w, :, :m].t() @ dx[w]
-                v_new = -dx[w] + VTs[w, :m].t() @ ut_dx
-            else:
-                v_new = -dx[w].clone()
-            idx = m % memory_limit
-            Us[w, :, idx] = u_new
-            VTs[w, idx] = v_new
-            if m < memory_limit:
-                n_stored[w] = m + 1
-
-        z = z_new
-        gx = gx_new
-
-    z_out = z.view(W, *orig_shape_per).to(z0_batch.dtype)
+    results = []
     infos = []
-    for w in range(W):
-        jac = (Us[w].detach().clone(), VTs[w].detach().clone(), n_stored[w])
-        res = float(gx[w].norm().item()) if not converged[w] else residuals_all[w][-1]
-        info = BroydenInfo(
-            final_iters[w], res, converged[w], residuals_all[w], jacobian_state=jac,
+    for i in range(W):
+        z_star_i, info_i = broyden_fixed_point(
+            phi,
+            z0_batch[i],
+            tol=tol,
+            max_iter=max_iter,
+            parent_inv_jacobian=parent_inv_jacobian,
+            fp32_buffer=fp32_buffer,
+            memory_limit=memory_limit,
         )
-        if _global_stats is not None:
-            _global_stats.update(info, is_root=is_root)
-        infos.append(info)
-
-    return z_out, infos
+        results.append(z_star_i)
+        infos.append(info_i)
+    return torch.stack(results), infos

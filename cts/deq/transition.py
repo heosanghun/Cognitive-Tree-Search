@@ -55,7 +55,7 @@ def transition(
     max_decode_tokens: int = 1,
     faiss_context: Optional[LatentContextWindow] = None,
     fp32_buffer: bool = True,
-    parent_inv_jacobian: Optional[Tuple[torch.Tensor, torch.Tensor, int]] = None,
+    parent_inv_jacobian: Optional[Tuple[torch.Tensor, List, List]] = None,
     parent_z_star: Optional[torch.Tensor] = None,
     noise_sigma: float = 0.02,
 ) -> TransitionResult:
@@ -212,7 +212,7 @@ def transition_batch(
     max_decode_tokens: int = 1,
     faiss_context: Optional[LatentContextWindow] = None,
     fp32_buffer: bool = True,
-    parent_inv_jacobian: Optional[Tuple[torch.Tensor, torch.Tensor, int]] = None,
+    parent_inv_jacobian: Optional[Tuple[torch.Tensor, List, List]] = None,
     parent_z_star: Optional[torch.Tensor] = None,
     noise_sigma: float = 0.02,
 ) -> List[TransitionResult]:

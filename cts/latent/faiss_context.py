@@ -80,8 +80,8 @@ class LatentContextWindow:
         if not _FAISS_AVAILABLE or np is None:
             return
         n = len(self._keys)
-        actual_nlist = min(self.nlist, max(1, n // 4))
-        if n < actual_nlist:
+        actual_nlist = min(self.nlist, max(1, n // 10))
+        if n < actual_nlist * 4:
             return
 
         quantizer = faiss.IndexFlatIP(self.dim)
@@ -126,7 +126,8 @@ class LatentContextWindow:
             faiss.normalize_L2(vec_np)
             self._flat_index.add(vec_np)
 
-        if not self._trained and len(self._keys) >= max(40, self.nlist):
+        min_train = max(40, self.nlist * 4)
+        if not self._trained and len(self._keys) >= min_train:
             self._build_ivfpq()
 
     def retrieve(
