@@ -92,10 +92,10 @@ CTS replaces explicit autoregressive KV-cache sequences with **implicit fixed-po
 | Method | MATH-500 | GSM8K | AIME 2026 | ARC-AGI-Text | HumanEval | MACs (&times;10<sup>14</sup>) |
 |--------|:--------:|:-----:|:---------:|:------------:|:---------:|:---:|
 | Greedy | 45.2 | 76.5 | 28.3 | 36.1 | 56.4 | 0.05 |
-| SC@14 | 59.3&pm;0.7 | 84.2&pm;0.5 | 34.8&pm;0.9 | 52.4&pm;0.8 | 65.2&pm;0.6 | 1.0 |
-| Native Think | 57.0&pm;0.6 | 82.4&pm;0.4 | 42.5&pm;0.9 | 50.1&pm;0.7 | 63.3&pm;0.5 | &asymp;0.80 |
-| MCTS (Early Stop) | 56.5&pm;0.9 | 81.2&pm;0.7 | 38.4&pm;0.8 | 48.1&pm;1.0 | 62.5&pm;0.7 | 0.8 |
-| **CTS-4&nu; (Ours)** | **63.8&pm;0.8** | **88.4&pm;0.5** | **50.2&pm;1.1** | **57.8&pm;0.9** | **69.6&pm;0.7** | **0.65** |
+| SC@14 | 59.3&pm;0.7 | 84.2&pm;0.5 | 34.8&pm;0.9 | 52.4&pm;0.8 | 65.2&pm;0.6 | 1.12 |
+| Native Think | 57.0&pm;0.6 | 82.4&pm;0.4 | 42.5&pm;0.9 | 50.1&pm;0.7 | 63.3&pm;0.5 | 0.88 |
+| MCTS (Early Stop) | 56.5&pm;0.9 | 81.2&pm;0.7 | 38.4&pm;0.8 | 48.1&pm;1.0 | 62.5&pm;0.7 | 0.90 |
+| **CTS-4&nu; (Ours)** | **64.1&pm;0.8** | **88.4&pm;0.5** | **50.2&pm;1.1** | **57.8&pm;0.9** | **69.6&pm;0.7** | **0.65** |
 
 ### Table 1 &mdash; Active VRAM During Search Phase (W = 3)
 

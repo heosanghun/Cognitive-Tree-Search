@@ -444,7 +444,7 @@ substitute one set for the other. Regression coverage:
 year &isin; {2024, 2025, 2026} 30-each, 60-row real-source guard for
 the 2024+2025 batch, network-fetch idempotency hard-guard).
 
-## Q13. Why is local CTS-4&nu; MATH-500 = 40.0 when the paper reports 63.8&pm;0.8? Is this a discrepancy or a methodological flaw?
+## Q13. Why is local CTS-4&nu; MATH-500 = 40.0 when the paper reports 64.1&pm;0.8? Is this a discrepancy or a methodological flaw?
 
 It is a **predictable compute-scaling gap**, not a method gap. We give
 the reviewer a fully audit-able causal chain instead of a vague
@@ -472,7 +472,7 @@ f_sample  ~  1.00   (mean is ~unbiased; effect on CI not mean)
 ### Step 3. Observed ratio
 
 ```
-observed: 40.0 / 63.8 = 0.627  (local is *above* the prediction)
+observed: 40.0 / 64.1 = 0.624  (local is *above* the prediction)
 ```
 
 The observed ratio exceeds the conservative multiplicative prediction,

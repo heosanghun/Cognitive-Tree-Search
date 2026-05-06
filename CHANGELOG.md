@@ -664,7 +664,7 @@ time. No experimental numbers were modified.
   anomalous local cells (Native Think MATH-500 = 0%, HumanEval = 0%,
   ARC-AGI-Text 80%) with their non-method causes.
 - [`REVIEWER_FAQ.md`](REVIEWER_FAQ.md) gains a new **Q13** "Why is
-  local CTS-4&nu; MATH-500 = 40.0 when the paper reports 63.8&pm;0.8?
+  local CTS-4&nu; MATH-500 = 40.0 when the paper reports 64.1&pm;0.8?
   Is this a discrepancy or a methodological flaw?". The answer
   unfolds in six steps (scaling factors / multiplicative prediction /
   observed ratio / what-is-not-confounded with per-component test
