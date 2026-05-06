@@ -1,0 +1,212 @@
+name: tests
+
+# CPU-only regression suite. Runs every push/PR on the
+# d2-neurips2026-anonymized branch and on main, so any change
+# touching the reviewer-facing surface (anon ZIP, post-stage2
+# pipeline, watcher contract, sweep manifests, AIME dispatcher)
+# is verified before it can drift between D11 and D12.
+
+on:
+  push:
+    branches:
+      - main
+      - d2-neurips2026-anonymized
+  pull_request:
+    branches:
+      - main
+      - d2-neurips2026-anonymized
+
+# Cancel in-progress runs for the same branch on a new push.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpu-tests:
+    name: CPU pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install CPU-only torch
+        # CUDA wheels add ~2 GB and are pointless in a CPU runner.
+        run: |
+          python -m pip install --upgrade pip wheel
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu \
+            "torch>=2.0"
+
+      - name: Install project + dev extras
+        run: |
+          python -m pip install -e ".[dev,data]"
+          python -m pip install transformers safetensors pyyaml \
+            accelerate huggingface_hub sentencepiece numpy
+
+      - name: Show environment
+        run: |
+          python --version
+          python -c "import torch; print('torch', torch.__version__, 'cuda?', torch.cuda.is_available())"
+          pip list | head -40
+
+      - name: Run regression tests (excluding slow markers)
+        env:
+          CTS_DISABLE_TRITON: "1"
+          PYTHONIOENCODING: "utf-8"
+        run: |
+          pytest -q --tb=line -m "not slow" --maxfail=10
+
+      - name: D-7 torch-free static validation (always runs)
+        # Re-runs the static D-7 patch check from
+        # ``tests/test_d7_static_validation.py`` directly via Python
+        # so that even if the main pytest run fails to collect (e.g.
+        # transformers / torch import-time crash on a future Python
+        # version), the D-7 patch sites + Q15 incident disclosure
+        # are still verified to be present and intact in the source.
+        # Mirrors the contract documented in REVIEWER_FAQ Q15
+        # ("how to verify locally without import torch").
+        env:
+          PYTHONIOENCODING: "utf-8"
+        run: |
+          python -m pytest -q --tb=line tests/test_d7_static_validation.py
+
+      - name: D12 final-submission sanity check
+        # End-to-end pre-submission gate: D-7 patch sites + docs
+        # markers + anonymous ZIP rebuild + audit. Same script the
+        # author runs immediately before clicking "submit" on the
+        # OpenReview supplementary-material slot. Hard-fails the CI
+        # if anything reviewer-facing has drifted.
+        env:
+          PYTHONIOENCODING: "utf-8"
+        run: |
+          python scripts/_d12_final_check.py
+
+      - name: Reviewer walkthrough (zero-MISS gate)
+        # The reviewer's interactive entry-point. Asserts every
+        # paper claim listed in REPRODUCIBILITY.md §5-pent
+        # resolves to a real file + test.
+        env:
+          PYTHONIOENCODING: "utf-8"
+        run: |
+          python -m pytest -q --tb=line tests/test_reviewer_walkthrough_invariants.py
+
+      - name: Replication script CI mode (verdict export)
+        # Mirrors what an external reviewer / area chair would
+        # run: ``bash scripts/replicate_neurips_2026.sh --ci-mode``.
+        # Exports the structured D12 verdict (JSON + paste-ready
+        # markdown) to ``results/d12_verdict.{json,md}`` and
+        # surfaces the verdict line in the workflow log.
+        env:
+          PYTHONIOENCODING: "utf-8"
+        run: |
+          mkdir -p results
+          bash scripts/replicate_neurips_2026.sh --ci-mode
+
+      - name: Upload D12 verdict artefact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: d12-verdict-py${{ matrix.python-version }}
+          path: |
+            results/d12_verdict.json
+            results/d12_verdict.md
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Reviewer-simulated ZIP rebuild
+        # Verifies that the anonymous ZIP rebuilds cleanly from a
+        # fresh checkout (catches missing files, broken globs, or
+        # pyzipper / zipfile API drift).
+        # NOTE: the audit script (_audit_anon_zip.py) is gitignored
+        # because it carries identity-leak regexes; the equivalent
+        # checks live in tests/test_anonymous_submission.py.
+        run: |
+          python scripts/make_anonymous_submission.py
+          python -c "
+          import zipfile, sys
+          zp = 'anonymous_submission_neurips2026.zip'
+          prefix = 'cts_neurips2026/'
+          with zipfile.ZipFile(zp) as zf:
+              names = set(zf.namelist())
+
+          # Hard-fail on any logs/ leakage (D-7 catch).
+          logs = [x for x in names if '/logs/' in x]
+          assert len(logs) == 0, f'logs leaked into ZIP: {logs[:5]}'
+
+          # Hard-fail if author-facing progress reports leak.
+          prog = [x for x in names if 'PROGRESS_REPORT' in x]
+          assert len(prog) == 0, f'PROGRESS_REPORT leaked into ZIP: {prog}'
+
+          # D-7 fix coverage. Every reviewer-relevant patch landed
+          # 2026-04-29 must survive into the submission ZIP.
+          d7_checks = [
+              ('tests/test_aime_garbage_fix.py',
+               'test_decode_from_z_star_accepts_problem_text_kwarg'),
+              ('tests/test_pipeline_partial_save.py',
+               'test_run_cts_eval_full_emits_partial_snapshot'),
+              ('tests/test_d7_static_validation.py',
+               'test_q15_reviewer_faq_present'),
+              ('tests/test_watcher_invariants.py',
+               'test_watcher_forwards_d7_limit_knobs'),
+              ('cts/backbone/gemma_adapter.py', 'problem_text: Optional[str]'),
+              ('cts/mcts/cts_episode.py', 'problem_text=prompt'),
+              ('scripts/run_cts_eval_full.py', 'table2_results.partial.json'),
+              ('scripts/run_post_stage2_pipeline.py', '--table2-limit'),
+              ('scripts/wait_and_run_pipeline.ps1', '--table2-limit'),
+              ('scripts/_d12_final_check.py', 'section_d7_patches'),
+              ('scripts/_d12_final_check.py', '--export-verdict'),
+              ('scripts/reviewer_walkthrough.py', 'cell_drill_q14_fix'),
+              ('scripts/replicate_neurips_2026.sh', '--ci-mode'),
+              ('tests/test_anon_zip_byte_invariants.py', 'AUTHOR_DRAFT_HEADERS'),
+              ('tests/test_paper_section_alignment.py', 'test_5pent_covers_every_primary_section_family'),
+              ('tests/test_reviewer_walkthrough_invariants.py', 'test_walkthrough_zero_miss'),
+              ('REVIEWER_FAQ.md', 'Q14'),
+              ('REVIEWER_FAQ.md', 'Q15'),
+              ('REVIEWER_FAQ.md', 'Q16'),
+              ('CHANGELOG.md', 'D-7 Apr 29'),
+              ('REPRODUCIBILITY.md', '5-quat'),
+          ]
+          missing = []
+          marker_fail = []
+          with zipfile.ZipFile(zp) as zf:
+              for path, marker in d7_checks:
+                  full = prefix + path
+                  if full not in names:
+                      missing.append(path)
+                      continue
+                  content = zf.read(full).decode('utf-8', errors='ignore')
+                  if marker not in content:
+                      marker_fail.append((path, marker))
+          assert not missing, f'D-7 files missing from ZIP: {missing}'
+          assert not marker_fail, f'D-7 markers missing: {marker_fail}'
+
+          print(f'ZIP OK | {len(names)} files | 0 logs | 0 PROGRESS_REPORT | D-7 {len(d7_checks)}/{len(d7_checks)}')
+          "
+
+  shellcheck:
+    name: PowerShell + shell script linting
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run shellcheck on bash scripts
+        # Only a handful of .sh files; PowerShell scripts are
+        # validated via tests/test_watcher_invariants.py instead.
+        run: |
+          if compgen -G "scripts/*.sh" > /dev/null; then
+            sudo apt-get update -y && sudo apt-get install -y shellcheck
+            shellcheck scripts/*.sh
+          else
+            echo "no .sh scripts to lint"
+          fi
