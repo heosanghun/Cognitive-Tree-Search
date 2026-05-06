@@ -1,6 +1,6 @@
 # Cognitive Tree Search (CTS)
 
-**KV-Cache-Free Per-Node Active O(1) Transitions for System 2 Inference via Deep Equilibrium Models**
+**Memory-Efficient Deep Tree Search for Language Model Reasoning**
 
 *Anonymous &mdash; NeurIPS 2026 Submission (under double-blind review)*
 
@@ -388,8 +388,8 @@ pytest tests/test_batch_transition.py -v        # Parallel batch DEQ
 
 ```bibtex
 @inproceedings{cts2026,
-  title     = {Cognitive Tree Search: {KV}-Cache-Free Per-Node Active {O}(1)
-               Transitions for System 2 Inference via Deep Equilibrium Models},
+  title     = {Cognitive Tree Search: Memory-Efficient Deep Tree Search
+               for Language Model Reasoning},
   author    = {Anonymous},
   booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
   year      = {2026},
